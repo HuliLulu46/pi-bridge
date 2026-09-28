@@ -40,6 +40,11 @@ export function logPath(name: string): string {
   return join(bridgeDir("logs"), `${name}.log`);
 }
 
+/** 常驻进程的 unix socket（sock）与 stdout/stderr 输出（err） */
+export function runPath(name: string, kind: "sock" | "err"): string {
+  return join(bridgeDir("run"), `${name}.${kind}`);
+}
+
 export function readRecord(name: string): SessionRecord | undefined {
   try {
     return JSON.parse(readFileSync(recordPath(name), "utf8")) as SessionRecord;
@@ -64,6 +69,7 @@ export function removeRecord(name: string): boolean {
     throw err;
   }
   rmSync(logPath(name), { force: true });
+  rmSync(runPath(name, "err"), { force: true });
   return true;
 }
 
@@ -108,7 +114,9 @@ export function acquireLock(name: string): () => void {
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
         const holder = lockHolder(name);
-        if (holder !== undefined) throw new Error(`会话 ${name} 正在运行（pid ${holder}），请等待结束后再发送`);
+        if (holder !== undefined) {
+          throw new Error(`会话 ${name} 正被占用（pid ${holder}）：有任务在运行，或常驻进程未停止`);
+        }
         rmSync(path, { force: true });
       }
     }

@@ -1,0 +1,129 @@
+export interface ContentBlock {
+  type: string;
+  text?: string;
+}
+
+export interface PiMessage {
+  role: string;
+  content?: ContentBlock[] | string;
+  stopReason?: string;
+  errorMessage?: string;
+}
+
+/** pi 在 stdout 上输出的记录：会话事件、RPC 命令响应、扩展 UI 请求 */
+export interface PiEvent {
+  type: string;
+  id?: string;
+  message?: PiMessage;
+  toolName?: string;
+  args?: unknown;
+  result?: { content?: ContentBlock[] };
+  isError?: boolean;
+  attempt?: number;
+  maxAttempts?: number;
+  errorMessage?: string;
+  command?: string;
+  success?: boolean;
+  error?: string;
+  method?: string;
+  title?: string;
+  options?: string[];
+}
+
+export interface RunResult {
+  ok: boolean;
+  reply: string;
+  error?: string;
+  /** 出错或被扩展拦截的工具调用，每项为「工具名: 结果摘要」 */
+  failedTools: string[];
+}
+
+const PREVIEW_LEN = 200;
+
+export function preview(value: unknown): string {
+  const text = typeof value === "string" ? value : JSON.stringify(value);
+  const oneLine = text.replace(/\s+/g, " ").trim();
+  return oneLine.length > PREVIEW_LEN ? `${oneLine.slice(0, PREVIEW_LEN)}…` : oneLine;
+}
+
+function textOf(content: ContentBlock[] | string | undefined): string {
+  if (typeof content === "string") return content;
+  return (content ?? [])
+    .filter((block) => block.type === "text")
+    .map((block) => block.text ?? "")
+    .join("\n");
+}
+
+export function toolNotice(failedTools: string[]): string {
+  if (failedTools.length === 0) return "";
+  return `\n\n[pi-bridge] ${failedTools.length} 次工具调用出错或被拦截：\n${failedTools.map((item) => `- ${item}`).join("\n")}`;
+}
+
+/** 按 LF 切分字节流；不用 readline，它会把 JSON 字符串里的 U+2028/U+2029 当成换行 */
+export function createLineSplitter(): (chunk: Buffer) => string[] {
+  let pending = Buffer.alloc(0);
+  return (chunk) => {
+    pending = Buffer.concat([pending, chunk]);
+    const lines: string[] = [];
+    let newline: number;
+    while ((newline = pending.indexOf(0x0a)) !== -1) {
+      lines.push(pending.subarray(0, newline).toString("utf8").replace(/\r$/, ""));
+      pending = pending.subarray(newline + 1);
+    }
+    return lines;
+  };
+}
+
+export function parseEvent(line: string): PiEvent | undefined {
+  try {
+    return JSON.parse(line) as PiEvent;
+  } catch {
+    return undefined;
+  }
+}
+
+/** 跟踪一次运行：把工具调用与重试转成进度行；回复为本次运行中每条正常结束的 assistant 文本（含 steer、follow-up 引出的回复） */
+export function createRunTracker(onProgress: (line: string) => void) {
+  let lastAssistant: PiMessage | undefined;
+  let settled = false;
+  const replies: string[] = [];
+  const failedTools: string[] = [];
+
+  return {
+    handle(event: PiEvent): void {
+      switch (event.type) {
+        case "message_end": {
+          if (event.message?.role !== "assistant") break;
+          lastAssistant = event.message;
+          const text = textOf(lastAssistant.content).trim();
+          if (lastAssistant.stopReason === "stop" && text) replies.push(text);
+          break;
+        }
+        case "tool_execution_start":
+          onProgress(`[tool] ${event.toolName} ${preview(event.args)}`);
+          break;
+        case "tool_execution_end":
+          if (event.isError) {
+            const summary = `${event.toolName}: ${preview(textOf(event.result?.content))}`;
+            failedTools.push(summary);
+            onProgress(`[tool-error] ${summary}`);
+          }
+          break;
+        case "auto_retry_start":
+          onProgress(`[retry] ${event.attempt}/${event.maxAttempts} ${event.errorMessage}`);
+          break;
+        case "agent_settled":
+          settled = true;
+          break;
+      }
+    },
+    result(fallbackError: () => string): RunResult {
+      const reply = replies.length > 0 ? replies.join("\n\n") : textOf(lastAssistant?.content).trim();
+      const stopReason = lastAssistant?.stopReason;
+      if (settled && lastAssistant && stopReason !== "error" && stopReason !== "aborted") {
+        return { ok: true, reply, failedTools };
+      }
+      return { ok: false, reply, error: lastAssistant?.errorMessage ?? fallbackError(), failedTools };
+    },
+  };
+}

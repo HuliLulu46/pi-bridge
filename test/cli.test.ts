@@ -1,57 +1,14 @@
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, realpathSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { fileURLToPath } from "node:url";
 import { beforeEach, test } from "node:test";
-
-const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
-const FAKE_PI = fileURLToPath(new URL("./fake-pi.mjs", import.meta.url));
-
-interface Result {
-  code: number | null;
-  stdout: string;
-  stderr: string;
-}
+import { piCalls, run, runAsync, sessionIdOf, setup } from "./helpers.ts";
 
 let home: string;
 let work: string;
 
 beforeEach(() => {
-  home = realpathSync(mkdtempSync(join(tmpdir(), "pi-bridge-home-")));
-  work = realpathSync(mkdtempSync(join(tmpdir(), "pi-bridge-work-")));
+  ({ home, work } = setup());
 });
-
-function env(): NodeJS.ProcessEnv {
-  return { ...process.env, PI_BIN: FAKE_PI, PI_BRIDGE_HOME: home, FAKE_PI_CALLS: join(home, "calls.jsonl") };
-}
-
-function run(args: string[], opts: { input?: string; cwd?: string } = {}): Result {
-  const result = spawnSync("node", [CLI, ...args], { cwd: opts.cwd ?? work, env: env(), input: opts.input, encoding: "utf8" });
-  return { code: result.status, stdout: result.stdout, stderr: result.stderr };
-}
-
-function runAsync(args: string[]): Promise<Result> {
-  const child = spawn("node", [CLI, ...args], { cwd: work, env: env() });
-  let stdout = "";
-  let stderr = "";
-  child.stdout.on("data", (chunk) => (stdout += chunk));
-  child.stderr.on("data", (chunk) => (stderr += chunk));
-  return new Promise((resolve) => child.on("close", (code) => resolve({ code, stdout, stderr })));
-}
-
-function piCalls(): Array<{ argv: string[]; cwd: string; subagent?: string }> {
-  return readFileSync(join(home, "calls.jsonl"), "utf8")
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line));
-}
-
-function sessionIdOf(argv: string[]): string | undefined {
-  return argv[argv.indexOf("--session-id") + 1];
-}
 
 test("首次 send 创建会话，之后在任意目录 send 都复用同一 id 与 cwd", () => {
   const first = run(["send", "s1", "hello"]);
@@ -88,7 +45,7 @@ test("同一会话运行中再次 send 会被锁拒绝", async () => {
   await sleep(500);
   const blocked = run(["send", "s1", "hi"]);
   assert.equal(blocked.code, 1);
-  assert.match(blocked.stderr, /正在运行/);
+  assert.match(blocked.stderr, /正被占用/);
   assert.equal((await slow).code, 0);
 });
 
