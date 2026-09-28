@@ -22,7 +22,7 @@ export interface Ask {
 export type ClientRequest =
   | { type: "prompt"; message: string }
   | { type: "steer" | "follow_up"; message: string }
-  | { type: "answer"; id: string; value?: string; cancelled?: boolean }
+  | { type: "answer"; id: string; value?: string; cancelled?: boolean; action?: string }
   | { type: "abort" }
   | { type: "stop" }
   | { type: "watch"; waitStartMs: number };
@@ -35,12 +35,28 @@ export type DaemonMessage =
   | { type: "done"; text: string }
   | { type: "failed"; error: string; text: string };
 
+/** 权限确认的内容原文。同意时须原样放进 answer 命令，让 Claude Code auto 模式的分类器审查到实际操作 */
+export function confirmText(ask: Ask): string {
+  return ask.message ?? ask.title;
+}
+
 export function formatAsk(name: string, ask: Ask): string {
+  const command = `pi-bridge answer ${name} ${ask.id}`;
+  if (ask.method === "confirm") {
+    return [
+      `[ask] ${ask.id} confirm: ${ask.title}`,
+      `拒绝：${command} no`,
+      "同意：须把确认内容原文放进 --action，供 Claude Code auto 模式审查：",
+      `${command} yes --action - <<'EOF'`,
+      confirmText(ask).trimEnd(),
+      "EOF",
+    ].join("\n");
+  }
   const lines = [`[ask] ${ask.id} ${ask.method}: ${ask.title}`];
   if (ask.message) lines.push(ask.message);
   ask.options?.forEach((option, index) => lines.push(`  ${index + 1}) ${option}`));
-  const value = { select: "<序号或选项原文>", confirm: "yes|no", input: "<文本|->", editor: "<文本|->" }[ask.method];
-  lines.push(`回答：pi-bridge answer ${name} ${ask.id} ${value}（或 --cancel 取消）`);
+  const value = ask.method === "select" ? "<序号或选项原文>" : "<文本|->";
+  lines.push(`回答：${command} ${value}（或 --cancel 取消）`);
   return lines.join("\n");
 }
 

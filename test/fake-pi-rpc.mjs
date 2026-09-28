@@ -45,8 +45,9 @@ async function run(message) {
     const res = await dialog({ id: "ask-1", method: "select", title: "选 A 还是 B？", options: ["1. A", "2. B"] });
     return finish(res.cancelled ? "chose:cancelled" : `chose:${res.value}`);
   }
-  if (message === "confirm") {
-    const res = await dialog({ id: "confirm-1", method: "confirm", title: "Allow rm?", message: "rm -rf build" });
+  if (message === "confirm" || message.startsWith("confirm:")) {
+    const text = message === "confirm" ? "rm -rf build" : message.slice("confirm:".length);
+    const res = await dialog({ id: "confirm-1", method: "confirm", title: "Auto mode permission ask", message: text });
     if (res.confirmed) return finish("confirmed");
     emit({ type: "tool_execution_end", toolName: "bash", isError: true, result: { content: [{ type: "text", text: "Declined permissions.ask" }] } });
     return finish("declined");

@@ -4,7 +4,7 @@ import { appendFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
 import { createLineSplitter, createRunTracker, parseEvent, preview, toolNotice, type PiEvent } from "./events.ts";
 import { PI_ENV, piBin } from "./pi.ts";
-import { DONE, FAILED, formatAsk, type Ask, type AskMethod, type ClientRequest, type DaemonMessage } from "./protocol.ts";
+import { confirmText, DONE, FAILED, formatAsk, type Ask, type AskMethod, type ClientRequest, type DaemonMessage } from "./protocol.ts";
 import { acquireLock, logPath, readRecord, runPath, writeRecord } from "./store.ts";
 
 export interface DaemonOptions {
@@ -189,6 +189,15 @@ function answerResponse(ask: Ask, value: string): Record<string, unknown> {
   }
 }
 
+const normalize = (text: string): string => text.replace(/\s+/g, " ").trim();
+
+function assertActionMatches(ask: Ask, action: string | undefined): void {
+  if (action === undefined) throw new Error("同意权限确认时必须用 --action 附上确认内容原文");
+  if (normalize(action) !== normalize(confirmText(ask))) {
+    throw new Error("--action 与待确认的内容不一致，请原样复制确认内容");
+  }
+}
+
 async function handleRequest(socket: Socket, req: ClientRequest): Promise<void> {
   switch (req.type) {
     case "prompt": {
@@ -219,6 +228,7 @@ async function handleRequest(socket: Socket, req: ClientRequest): Promise<void> 
       const ask = pending.get(req.id);
       if (!ask) throw new Error(`没有待回答的提问：${req.id}`);
       const response = req.cancelled ? { cancelled: true } : answerResponse(ask, req.value ?? "");
+      if (response.confirmed === true) assertActionMatches(ask, req.action);
       clearTimeout(ask.timer);
       pending.delete(req.id);
       emit(`[answered] ${req.id} ${preview(response)}`);

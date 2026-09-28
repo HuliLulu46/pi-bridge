@@ -33,7 +33,7 @@ const USAGE = `用法：
   pi-bridge start <会话名> [--cwd <目录>] [--model <模型>] [--allow-confirm] [-- <pi 参数>...]
   pi-bridge steer <会话名> <消息|->
   pi-bridge follow-up <会话名> <消息|->
-  pi-bridge answer <会话名> <提问 id> <回答|->
+  pi-bridge answer <会话名> <提问 id> <回答|-> [--action <确认内容原文|->]
   pi-bridge answer <会话名> <提问 id> --cancel
   pi-bridge abort <会话名>
   pi-bridge stop <会话名>
@@ -265,13 +265,23 @@ async function abort(argv: string[]): Promise<number> {
 }
 
 async function answer(argv: string[]): Promise<number> {
-  const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: { cancel: { type: "boolean" } } });
+  const { values, positionals } = parseArgs({
+    args: argv,
+    allowPositionals: true,
+    options: { cancel: { type: "boolean" }, action: { type: "string" } },
+  });
   const [name, id, raw] = positionals;
   assertName(name);
   if (!id) throw new Error("缺少提问 id");
+  if (raw === "-" && values.action === "-") throw new Error("回答与 --action 不能同时从 stdin 读取");
   const req: ClientRequest = values.cancel
     ? { type: "answer", id, cancelled: true }
-    : { type: "answer", id, value: raw === "-" ? await readStdin() : await readMessage(raw) };
+    : {
+        type: "answer",
+        id,
+        value: await readMessage(raw),
+        action: values.action === "-" ? await readStdin() : values.action,
+      };
   return awaitRun(name, request(await requireDaemon(name), req));
 }
 

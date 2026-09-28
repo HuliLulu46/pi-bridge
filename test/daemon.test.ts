@@ -66,12 +66,23 @@ test("权限确认默认自动拒绝并在回复末尾报告", () => {
   assert.match(result.stdout, /1 次工具调用出错或被拦截/);
 });
 
-test("--allow-confirm 时权限确认转给 Claude 回答", () => {
+test("--allow-confirm 时权限确认转给 Claude，同意须用 --action 附上一致的确认内容", () => {
   begin({}, ["--allow-confirm"]);
   const asked = run(["send", "s1", "confirm"]);
   assert.equal(asked.code, 2, asked.stderr);
-  assert.match(asked.stdout, /yes\|no/);
-  assert.equal(run(["answer", "s1", askId(asked.stdout), "yes"]).stdout, "confirmed\n");
+  assert.match(asked.stdout, /yes --action - <<'EOF'\nrm -rf build\nEOF$/m);
+  const id = askId(asked.stdout);
+
+  assert.match(run(["answer", "s1", id, "yes"]).stderr, /必须用 --action/);
+  assert.match(run(["answer", "s1", id, "yes", "--action", "echo hi"]).stderr, /不一致/);
+  const confirmed = run(["answer", "s1", id, "yes", "--action", "-"], { input: "  rm -rf\n build\n" });
+  assert.equal(confirmed.stdout, "confirmed\n", confirmed.stderr);
+});
+
+test("拒绝权限确认不需要附确认内容", () => {
+  begin({}, ["--allow-confirm"]);
+  const asked = run(["send", "s1", "confirm"]);
+  assert.match(run(["answer", "s1", askId(asked.stdout), "no"]).stdout, /^declined/);
 });
 
 test("提问超时后自动取消，pi 继续跑完", async () => {
