@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
+const CLI = fileURLToPath(new URL("../plugins/pi-bridge/src/cli.ts", import.meta.url));
 const FAKE_PI = fileURLToPath(new URL("./fake-pi.mjs", import.meta.url));
 
 export interface Result {

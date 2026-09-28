@@ -2,9 +2,6 @@
   "name": "agent-bridge",
   "private": true,
   "type": "module",
-  "bin": {
-    "pi-bridge": "./bin/pi-bridge"
-  },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node --test \"test/**/*.test.ts\""

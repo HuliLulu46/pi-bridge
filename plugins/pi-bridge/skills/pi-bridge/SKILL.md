@@ -71,7 +71,7 @@ watch 输出的行格式：`[start]` 本次消息摘要、`[tool]` 工具调用�
   ```
 
   这样 Claude Code auto 模式的分类器和把关 hook 审查这条命令时，能看到被批准的实际操作。常驻进程会核对 `--action` 与待确认内容是否一致（忽略空白差异），不一致则拒绝。
-- 把关 hook（`~/.claude/settings.json` 中的 PreToolUse hook，脚本为本仓库 `src/confirm-guard.ts`）审查每条同意命令：被批准的操作命中高风险规则，或经 Sonnet 复核认为危险、复核失败，就在 Claude Code 里弹窗请用户确认。用户拒绝后，回答 `no`。
+- 把关 hook（本插件的 PreToolUse hook，脚本为 `${CLAUDE_PLUGIN_ROOT}/src/confirm-guard.ts`）审查每条同意命令：被批准的操作命中高风险规则，或经 Sonnet 复核认为危险、复核失败，就在 Claude Code 里弹窗请用户确认。用户拒绝后，回答 `no`。
 - 分类器拦下这条命令时，同样回答 `no`，或把确认内容转述给用户，由用户决定。
 
 ## 会话规则

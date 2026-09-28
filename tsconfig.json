@@ -11,5 +11,5 @@
     "types": ["node"],
     "skipLibCheck": true
   },
-  "include": ["src", "test"]
+  "include": ["plugins/pi-bridge/src", "test"]
 }

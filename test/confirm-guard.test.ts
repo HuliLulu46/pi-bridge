@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { classify } from "../src/confirm-guard.ts";
+import { classify } from "../plugins/pi-bridge/src/confirm-guard.ts";
 
-const GUARD = fileURLToPath(new URL("../src/confirm-guard.ts", import.meta.url));
+const GUARD = fileURLToPath(new URL("../plugins/pi-bridge/src/confirm-guard.ts", import.meta.url));
 const FAKE_REVIEWER = fileURLToPath(new URL("./fake-reviewer.mjs", import.meta.url));
 
 function approve(action: string): string {
