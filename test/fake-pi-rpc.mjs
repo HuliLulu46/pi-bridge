@@ -1,4 +1,6 @@
 // 模拟 `pi --mode rpc`：从 stdin 读命令，按 prompt 内容决定行为，stdin 关闭即退出
+import { applyFileAction } from "./fake-actions.mjs";
+
 if (process.env.FAKE_PI_RPC_FAIL) {
   process.stderr.write("Error: boom\n");
   process.exit(1);
@@ -65,6 +67,11 @@ async function run(message) {
     }
     return end();
   }
+  if (message.startsWith("crash:")) {
+    applyFileAction(`write:${message.slice("crash:".length)}`);
+    process.exit(1);
+  }
+  applyFileAction(message);
   finish(`echo:${message}`);
 }
 

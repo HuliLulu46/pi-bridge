@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { appendFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
 import { createLineSplitter, createRunTracker, parseEvent, preview, toolNotice, type PiEvent } from "./events.ts";
+import { trackChanges } from "./git.ts";
 import { PI_ENV, piBin } from "./pi.ts";
 import { confirmText, DONE, FAILED, formatAsk, type Ask, type AskMethod, type ClientRequest, type DaemonMessage } from "./protocol.ts";
 import { acquireLock, logPath, readRecord, runPath, writeRecord } from "./store.ts";
@@ -48,6 +49,7 @@ const pi = spawn(
 
 let busy = false;
 let tracker = createRunTracker(emit);
+let finishChanges = (): string => "";
 let runLines: string[] = [];
 const pending = new Map<string, Ask & { timer: NodeJS.Timeout }>();
 /** send/answer 的连接：等到下一个提问或本次运行结束 */
@@ -96,6 +98,7 @@ function startRun(message: string): void {
   busy = true;
   clearTimeout(idleTimer);
   tracker = createRunTracker(emit);
+  finishChanges = trackChanges(record.cwd);
   runLines = [];
   writeFileSync(log, "");
   for (const [socket, timer] of awaitingStart) {
@@ -129,7 +132,7 @@ function endRun(ok: boolean, text: string, error: string): void {
 
 function finishRun(): void {
   const result = tracker.result(() => "pi 没有给出回复");
-  const notice = toolNotice(result.failedTools);
+  const notice = `${toolNotice(result.failedTools)}${finishChanges()}`;
   endRun(result.ok, result.ok ? `${result.reply}${notice}` : result.reply, `${result.error}${notice}`);
 }
 
@@ -292,7 +295,7 @@ pi.stdout.on("data", (chunk: Buffer) => {
 });
 
 pi.on("close", (code, signal) => {
-  if (busy) endRun(false, "", `pi 进程退出（${signal ?? `退出码 ${code}`}）`);
+  if (busy) endRun(false, "", `pi 进程退出（${signal ?? `退出码 ${code}`}）${finishChanges()}`);
   for (const socket of awaitingStart.keys()) socket.end();
   server.close();
   rmSync(socketFile, { force: true });

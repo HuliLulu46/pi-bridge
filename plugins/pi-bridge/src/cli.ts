@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { appendFileSync, closeSync, existsSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, openSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import type { Socket } from "node:net";
 import { resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -8,12 +8,15 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import type { DaemonOptions } from "./daemon.ts";
 import { preview, toolNotice } from "./events.ts";
+import { createWorktree, removeWorktree, rollbackError, trackChanges, type ReviewScope } from "./git.ts";
 import { runPi } from "./pi.ts";
+import { runReview } from "./review.ts";
 import { DONE, FAILED, formatAsk, openDaemon, request, type ClientRequest, type DaemonMessage } from "./protocol.ts";
 import {
   acquireLock,
   assertName,
   listRecords,
+  lockCreatedAt,
   lockHolder,
   logPath,
   readRecord,
@@ -24,13 +27,14 @@ import {
 } from "./store.ts";
 
 const USAGE = `用法：
-  pi-bridge send <会话名> [--cwd <目录>] [--model <模型>] <消息|-> [-- <pi 参数>...]
+  pi-bridge send <会话名> [--cwd <目录>] [--model <模型>] [--worktree] <消息|-> [-- <pi 参数>...]
   pi-bridge watch <会话名>
   pi-bridge list
-  pi-bridge rm <会话名>
+  pi-bridge rm <会话名> [--force]
+  pi-bridge review [--staged | --base <分支>] [--cwd <目录>] [--focus <关注点>] [--model <模型>] [--thinking <等级>]
 
 常驻进程（任务中途干预、回答 pi 的提问）：
-  pi-bridge start <会话名> [--cwd <目录>] [--model <模型>] [--allow-confirm] [-- <pi 参数>...]
+  pi-bridge start <会话名> [--cwd <目录>] [--model <模型>] [--allow-confirm] [--worktree] [-- <pi 参数>...]
   pi-bridge steer <会话名> <消息|->
   pi-bridge follow-up <会话名> <消息|->
   pi-bridge answer <会话名> <提问 id> <回答|-> [--action <确认内容原文|->]
@@ -39,6 +43,7 @@ const USAGE = `用法：
   pi-bridge stop <会话名>
 
 消息写 - 时从 stdin 读取。首次 send 或 start 创建会话并绑定 cwd（默认当前目录），之后固定在该目录运行。
+创建会话时加 --worktree，会在 <仓库>/.pi-bridge/worktrees/<会话名> 建立分支为 pi/<会话名> 的 worktree 并在其中运行。
 常驻进程运行时 send 自动转给它：拿到回复时退出码为 0；pi 提问时打印提问并以退出码 2 退出，用 answer 回答后继续等待。`;
 
 const EXIT_ASK = 2;
@@ -74,15 +79,31 @@ async function readMessage(raw: string | undefined): Promise<string> {
 }
 
 /** 需在会话锁内调用 */
-function ensureRecord(name: string, cwdOption: string | undefined): { record: SessionRecord; isNew: boolean } {
+function ensureRecord(
+  name: string,
+  cwdOption: string | undefined,
+  worktree: boolean,
+): { record: SessionRecord; isNew: boolean } {
   const existing = readRecord(name);
+  if (existing && worktree) throw new Error(`会话 ${name} 已存在，worktree 只能在创建会话时指定`);
   const cwd = resolve(cwdOption ?? existing?.cwd ?? process.cwd());
   if (existing && existing.cwd !== cwd) throw new Error(`会话 ${name} 绑定在 ${existing.cwd}，不能改到 ${cwd}`);
   if (existing) return { record: existing, isNew: false };
   if (!existsSync(cwd)) throw new Error(`目录不存在：${cwd}`);
   const now = new Date().toISOString();
-  const record = { name, id: randomUUID(), cwd, createdAt: now, updatedAt: now };
-  writeRecord(record);
+  const base = { name, id: randomUUID(), createdAt: now, updatedAt: now };
+  if (!worktree) {
+    const record = { ...base, cwd };
+    writeRecord(record);
+    return { record, isNew: true };
+  }
+  const created = createWorktree(cwd, name);
+  const record = { ...base, cwd: created.path, worktree: created.info };
+  try {
+    writeRecord(record);
+  } catch (err) {
+    throw rollbackError(err, created.rollback());
+  }
   return { record, isNew: true };
 }
 
@@ -125,7 +146,7 @@ async function send(argv: string[]): Promise<number> {
   const { values, positionals } = parseArgs({
     args: own,
     allowPositionals: true,
-    options: { cwd: { type: "string" }, model: { type: "string" } },
+    options: { cwd: { type: "string" }, model: { type: "string" }, worktree: { type: "boolean" } },
   });
   const [name, raw] = positionals;
   assertName(name);
@@ -134,6 +155,10 @@ async function send(argv: string[]): Promise<number> {
 
   const daemon = await openDaemon(name);
   if (daemon) {
+    if (values.worktree) {
+      daemon.destroy();
+      throw new Error(`会话 ${name} 已存在，worktree 只能在创建会话时指定`);
+    }
     const boundCwd = readRecord(name)?.cwd;
     if (values.cwd && resolve(values.cwd) !== boundCwd) {
       daemon.destroy();
@@ -152,7 +177,8 @@ async function send(argv: string[]): Promise<number> {
     writeFileSync(log, `[start] ${new Date().toISOString()} ${preview(message)}\n`);
     const progress = (line: string): void => appendFileSync(log, `${line}\n`);
 
-    const { record, isNew } = ensureRecord(name, values.cwd);
+    const { record, isNew } = ensureRecord(name, values.cwd, values.worktree ?? false);
+    const finishChanges = trackChanges(record.cwd);
     const result = await runPi({
       sessionId: record.id,
       cwd: record.cwd,
@@ -162,7 +188,7 @@ async function send(argv: string[]): Promise<number> {
     });
     writeRecord({ ...record, updatedAt: new Date().toISOString() });
 
-    const notice = toolNotice(result.failedTools);
+    const notice = `${toolNotice(result.failedTools)}${finishChanges()}`;
     if (result.ok) {
       progress(`[reply]\n${result.reply}${notice}\n${DONE}`);
       print(`${result.reply}${notice}`);
@@ -182,7 +208,12 @@ async function start(argv: string[]): Promise<number> {
   const { values, positionals } = parseArgs({
     args: own,
     allowPositionals: true,
-    options: { cwd: { type: "string" }, model: { type: "string" }, "allow-confirm": { type: "boolean" } },
+    options: {
+      cwd: { type: "string" },
+      model: { type: "string" },
+      "allow-confirm": { type: "boolean" },
+      worktree: { type: "boolean" },
+    },
   });
   const [name] = positionals;
   assertName(name);
@@ -198,7 +229,7 @@ async function start(argv: string[]): Promise<number> {
   const release = acquireLock(name);
   let ensured: ReturnType<typeof ensureRecord>;
   try {
-    ensured = ensureRecord(name, values.cwd);
+    ensured = ensureRecord(name, values.cwd, values.worktree ?? false);
   } finally {
     release();
   }
@@ -310,10 +341,21 @@ async function watchDaemon(name: string, daemon: Socket): Promise<number> {
   return 1;
 }
 
+/**
+ * 日志在当前这把锁创建之后被重写过，才属于正在进行的运行。send 拿到锁与重写日志之间有空档，
+ * 空档内读到的是上一次运行留下的日志，其中的结束标记会让 watch 误以为本次已结束
+ */
+function logBelongsToCurrentRun(name: string, log: string): boolean {
+  const lockedAt = lockCreatedAt(name);
+  return lockedAt !== undefined && existsSync(log) && statSync(log).mtimeMs >= lockedAt;
+}
+
 async function watchLog(name: string): Promise<number> {
   const log = logPath(name);
   const waitUntil = Date.now() + WATCH_START_WAIT_MS;
-  while (lockHolder(name) === undefined && Date.now() < waitUntil) await sleep(200);
+  while (!(lockHolder(name) !== undefined && logBelongsToCurrentRun(name, log)) && Date.now() < waitUntil) {
+    await sleep(200);
+  }
 
   let offset = 0;
   for (;;) {
@@ -345,23 +387,63 @@ function list(): number {
   for (const record of records) {
     const held = lockHolder(record.name) !== undefined;
     const status = !held ? "idle" : existsSync(runPath(record.name, "sock")) ? "daemon" : "running";
-    print([record.name, status, record.updatedAt, record.cwd, record.id].join("\t"));
+    const worktree = record.worktree ? [`${record.worktree.branch}@${record.worktree.base.slice(0, 12)}`] : [];
+    print([record.name, status, record.updatedAt, record.cwd, record.id, ...worktree].join("\t"));
   }
   return 0;
 }
 
 function rm(argv: string[]): number {
-  const [name] = argv;
+  const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: { force: { type: "boolean" } } });
+  const [name] = positionals;
   assertName(name);
   const release = acquireLock(name);
   try {
     const record = readRecord(name);
-    if (!record || !removeRecord(name)) throw new Error(`会话不存在：${name}`);
-    print(`已删除会话映射 ${name}，pi 会话文件（${record.id}）仍保留`);
+    if (!record) throw new Error(`会话不存在：${name}`);
+    if (record.worktree) removeWorktree(record.worktree, record.cwd, values.force ?? false);
+    removeRecord(name);
+    const worktreeNote = record.worktree ? `；worktree 已删除，分支 ${record.worktree.branch} 保留` : "";
+    print(`已删除会话映射 ${name}，pi 会话文件（${record.id}）仍保留${worktreeNote}`);
     return 0;
   } finally {
     release();
   }
+}
+
+async function review(argv: string[]): Promise<number> {
+  const { values } = parseArgs({
+    args: argv,
+    options: {
+      staged: { type: "boolean" },
+      base: { type: "string" },
+      cwd: { type: "string" },
+      focus: { type: "string" },
+      model: { type: "string" },
+      thinking: { type: "string" },
+    },
+  });
+  if (values.staged && values.base) throw new Error("--staged 与 --base 不能同时使用");
+  const scope: ReviewScope = values.staged
+    ? { kind: "staged" }
+    : values.base
+      ? { kind: "base", ref: values.base }
+      : { kind: "head" };
+  const result = await runReview({
+    cwd: resolve(values.cwd ?? process.cwd()),
+    scope,
+    focus: values.focus,
+    model: values.model,
+    thinking: values.thinking,
+  });
+  const notice = toolNotice(result.failedTools);
+  if (result.ok) {
+    print(`${result.reply}${notice}`);
+    return 0;
+  }
+  if (result.reply) print(result.reply);
+  process.stderr.write(`pi-bridge: ${result.error}${notice}\n`);
+  return 1;
 }
 
 const commands: Record<string, (argv: string[]) => number | Promise<number>> = {
@@ -375,6 +457,7 @@ const commands: Record<string, (argv: string[]) => number | Promise<number>> = {
   "follow-up": (argv) => queueMessage("follow_up", argv),
   answer,
   abort,
+  review,
 };
 
 const [command, ...rest] = process.argv.slice(2);

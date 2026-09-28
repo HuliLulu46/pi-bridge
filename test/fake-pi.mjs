@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // 模拟 pi：`-p --mode json` 按消息内容决定行为，`--mode rpc` 交给 fake-pi-rpc.mjs
-import { appendFileSync } from "node:fs";
+import { appendFileSync, readFileSync, statSync, writeFileSync } from "node:fs";
 
 const argv = process.argv.slice(2);
 appendFileSync(process.env.FAKE_PI_CALLS, JSON.stringify({ argv, cwd: process.cwd(), subagent: process.env.PI_CODE_SUBAGENT }) + "\n");
@@ -9,6 +9,12 @@ if (argv[argv.indexOf("--mode") + 1] === "rpc") {
   await import("./fake-pi-rpc.mjs");
 } else {
   const message = argv.at(-1);
+  // 评审的补丁文件在评审结束后会被删除，这里记下运行时看到的内容与权限
+  const patchFile = /完整内容在文件 (\S+\.patch)/.exec(message)?.[1];
+  if (patchFile) {
+    const patch = { mode: statSync(patchFile).mode & 0o777, content: readFileSync(patchFile, "utf8") };
+    writeFileSync(`${process.env.FAKE_PI_CALLS}.patch.json`, JSON.stringify(patch));
+  }
   const emit = (event) => process.stdout.write(JSON.stringify(event) + "\n");
   const assistant = (extra) => emit({ type: "message_end", message: { role: "assistant", ...extra } });
 
@@ -17,6 +23,8 @@ if (argv[argv.indexOf("--mode") + 1] === "rpc") {
     process.exit(1);
   }
   if (message === "slow") await new Promise((r) => setTimeout(r, 1500));
+  const { applyFileAction } = await import("./fake-actions.mjs");
+  applyFileAction(message);
 
   emit({ type: "session", id: argv[argv.indexOf("--session-id") + 1] });
   emit({ type: "agent_start" });

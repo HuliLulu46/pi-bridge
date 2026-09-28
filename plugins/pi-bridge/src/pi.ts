@@ -2,7 +2,8 @@ import { spawn } from "node:child_process";
 import { createLineSplitter, createRunTracker, parseEvent, type RunResult } from "./events.ts";
 
 export interface RunOptions {
-  sessionId: string;
+  /** 缺省时以 --no-session 运行，不留下会话记录 */
+  sessionId?: string;
   cwd: string;
   message: string;
   piArgs: string[];
@@ -20,7 +21,8 @@ export function piBin(): string {
 }
 
 export function runPi(opts: RunOptions): Promise<RunResult> {
-  const args = ["-p", "--mode", "json", "--session-id", opts.sessionId, ...opts.piArgs, "--", opts.message];
+  const session = opts.sessionId ? ["--session-id", opts.sessionId] : ["--no-session"];
+  const args = ["-p", "--mode", "json", ...session, ...opts.piArgs, "--", opts.message];
   const child = spawn(piBin(), args, { cwd: opts.cwd, env: PI_ENV, stdio: ["ignore", "pipe", "pipe"] });
 
   const tracker = createRunTracker(opts.onProgress);

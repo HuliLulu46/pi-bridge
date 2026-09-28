@@ -1,5 +1,5 @@
-import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, realpathSync } from "node:fs";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,8 +25,37 @@ export function setup(env: NodeJS.ProcessEnv = {}): { home: string; work: string
   return { home, work };
 }
 
+/** 隔离用户的全局 git 配置，并提供提交所需的身份 */
+export const GIT_ENV = {
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_CONFIG_NOSYSTEM: "1",
+  GIT_AUTHOR_NAME: "test",
+  GIT_AUTHOR_EMAIL: "test@example.com",
+  GIT_COMMITTER_NAME: "test",
+  GIT_COMMITTER_EMAIL: "test@example.com",
+};
+
+export function gitIn(dir: string, ...args: string[]): string {
+  return execFileSync("git", ["-C", dir, ...args], { env: { ...process.env, ...GIT_ENV }, encoding: "utf8" });
+}
+
+/** 在 dir 建立有一次提交（a.txt）的仓库，分支为 main */
+export function initRepo(dir: string): void {
+  gitIn(dir, "init", "-q", "-b", "main");
+  writeFileSync(join(dir, "a.txt"), "a\n");
+  gitIn(dir, "add", ".");
+  gitIn(dir, "commit", "-q", "-m", "init");
+}
+
 function env(): NodeJS.ProcessEnv {
-  return { ...process.env, PI_BIN: FAKE_PI, PI_BRIDGE_HOME: home, FAKE_PI_CALLS: join(home, "calls.jsonl"), ...extraEnv };
+  return {
+    ...process.env,
+    ...GIT_ENV,
+    PI_BIN: FAKE_PI,
+    PI_BRIDGE_HOME: home,
+    FAKE_PI_CALLS: join(home, "calls.jsonl"),
+    ...extraEnv,
+  };
 }
 
 export function run(args: string[], opts: { input?: string; cwd?: string } = {}): Result {
@@ -44,7 +73,9 @@ export function runAsync(args: string[]): Promise<Result> {
 }
 
 export function piCalls(): Array<{ argv: string[]; cwd: string; subagent?: string }> {
-  return readFileSync(join(home, "calls.jsonl"), "utf8")
+  const file = join(home, "calls.jsonl");
+  if (!existsSync(file)) return [];
+  return readFileSync(file, "utf8")
     .trim()
     .split("\n")
     .map((line) => JSON.parse(line));

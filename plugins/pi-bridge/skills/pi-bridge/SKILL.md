@@ -1,6 +1,6 @@
 ---
 name: pi-bridge
-description: 通过 pi-bridge 命令把任务交给 pi coding agent 执行，并按会话名管理 pi 会话（多轮续接、Monitor 跟随进度、任务中途插话或中止、回答 pi 的提问）。当用户要求“让 pi 做 / 交给 pi / 问问 pi / 用 pi agent”，或需要把任务委托给 pi 时使用。
+description: 通过 pi-bridge 命令把任务交给 pi coding agent 执行，并按会话名管理 pi 会话（多轮续接、worktree 隔离、Monitor 跟随进度、任务中途插话或中止、回答 pi 的提问），或让 pi 以只读方式评审当前改动。当用户要求“让 pi 做 / 交给 pi / 问问 pi / 让 pi 评审 / 用 pi agent”，需要把任务委托给 pi，或跨多个文件的改动在提交前需要第二意见时使用。
 ---
 
 # pi-bridge
@@ -14,11 +14,12 @@ description: 通过 pi-bridge 命令把任务交给 pi coding agent 执行，并
 
 | 命令 | 作用 |
 |---|---|
-| `pi-bridge send <会话名> [--cwd <目录>] [--model <模型>] <消息\|-> [-- <pi 参数>...]` | 发送一条消息并等待回复；会话不存在时创建 |
+| `pi-bridge send <会话名> [--cwd <目录>] [--model <模型>] [--worktree] <消息\|-> [-- <pi 参数>...]` | 发送一条消息并等待回复；会话不存在时创建 |
 | `pi-bridge watch <会话名>` | 跟随该会话当前任务的进度，任务结束后退出 |
-| `pi-bridge list` | 列出会话：名字、状态（idle / running / daemon）、更新时间、目录、session-id |
-| `pi-bridge rm <会话名>` | 删除会话映射；pi 自己的会话文件保留 |
-| `pi-bridge start <会话名> [--cwd <目录>] [--model <模型>] [--allow-confirm] [-- <pi 参数>...]` | 启动常驻进程 |
+| `pi-bridge list` | 列出会话：名字、状态（idle / running / daemon）、更新时间、目录、session-id；worktree 会话另附 `分支@base` |
+| `pi-bridge rm <会话名> [--force]` | 删除会话映射与 worktree（分支保留）；pi 自己的会话文件保留 |
+| `pi-bridge review [--staged \| --base <分支>] [--cwd <目录>] [--focus <关注点>] [--model <模型>] [--thinking <等级>]` | pi 以只读方式评审当前改动，见“让 pi 评审” |
+| `pi-bridge start <会话名> [--cwd <目录>] [--model <模型>] [--allow-confirm] [--worktree] [-- <pi 参数>...]` | 启动常驻进程 |
 | `pi-bridge steer <会话名> <消息\|->` | 任务中途插话：当前这轮工具执行完后送达，pi 据此调整 |
 | `pi-bridge follow-up <会话名> <消息\|->` | 追加任务：当前任务全部结束后接着执行，结果并入同一次回复 |
 | `pi-bridge answer <会话名> <提问 id> <回答\|->` / `--cancel` | 回答 pi 的提问，然后继续等待 |
@@ -29,6 +30,43 @@ description: 通过 pi-bridge 命令把任务交给 pi coding agent 执行，并
 
 - 一次性、目标明确的任务：直接 `send`，用 print 模式。
 - 可能需要中途纠偏、pi 可能需要问清需求、或要分几步追加指示的任务：先 `start`，再 `send`。用完 `stop`；常驻进程空闲 30 分钟后也会自动退出。
+
+## 工作目录：同一目录还是 worktree
+
+- **同一目录**（默认）：pi 直接改当前工作目录。适合小改动，且 Claude 在 pi 运行期间不改同一仓库。
+- **worktree**：创建会话时加 `--worktree`，pi 在 `<仓库>/.pi-bridge/worktrees/<会话名>` 中工作，分支为 `pi/<会话名>`，起点为当时的 HEAD。适合与 Claude 并行改代码、多个 pi 任务并行、或改动较大需要整体验收的任务。只能在创建会话时指定；要求当前目录在 git 仓库内且已有提交。
+
+验收并合并 worktree 中的改动：
+
+1. 查看累计改动：`git -C <worktree> diff <base>` 与 `git -C <worktree> status`（`base` 见 `pi-bridge list` 的 `分支@base`）；
+2. 需要第二意见时，在 worktree 中执行 `pi-bridge review --cwd <worktree> --base <原分支>`；
+3. 确认后在 worktree 中提交，回到原仓库合并分支 `pi/<会话名>`；
+4. `pi-bridge rm <会话名>` 删除会话与 worktree；分支保留，合并后自行删除。
+
+## 改动清单
+
+每次运行结束，回复末尾会附上 `[pi-bridge] 本次运行改动了 N 个文件：`，每行是 `git status --porcelain` 的状态码与路径；`(已提交)` 表示运行期间提交的文件，`删除未跟踪文件` 表示运行前就存在的未跟踪文件被删除，`恢复` 表示文件恢复为与 HEAD 一致。
+
+- 清单表示“运行期间变化的文件”，不表示“pi 改动的文件”：同一目录模式下，运行期间 Claude 对同一仓库的改动也会列入。需要严格区分时用 `--worktree`。
+- 只改文件权限位的变化不会被识别。
+- 文件名含控制字符等特殊字符时，以带双引号的转义形式显示，每个文件只占一行。
+- 验收时以清单为线索，自己查看 diff，不要只依据 pi 的描述。
+- 不在 git 仓库内时不附清单；出现 `改动统计失败` 时，自己用 git 检查改动。
+
+## 让 pi 评审
+
+`pi-bridge review` 让 pi 以只读方式评审改动：pi 只有 read、grep、find、ls 工具，不加载扩展，不写会话记录。
+
+| 参数 | 评审范围 |
+|---|---|
+| 无 | 工作区相对 HEAD 的全部改动，含未跟踪文件 |
+| `--staged` | 已暂存的改动 |
+| `--base <分支>` | 相对该分支分叉点的全部改动，含未提交部分与未跟踪文件 |
+
+- **用户发起**：`/pi-review` 斜杠命令。
+- **Claude 主动发起**：跨多个文件的逻辑改动之后、提交之前执行 `pi-bridge review`；小改动不评审。用 `--focus` 指出希望重点检查的方面。
+- 处理结果：逐条对照代码核实 pi 的结论，标注认同、不认同或待确认并说明理由，呈现给用户；不要未经用户同意就按评审意见修改代码。
+- Bash `timeout` 设为 600000。
 
 ## 选择调用方式
 
@@ -85,6 +123,7 @@ watch 输出的行格式：`[start]` 本次消息摘要、`[tool]` 工具调用�
 ## 写消息
 
 - pi 看不到 Claude 的对话上下文。消息要自包含：目标、相关文件路径、完成标准，以及希望 pi 在回复里汇报什么（改了哪些文件、命令执行结果等），因为 Claude 只能拿到最终回复。
+- 需要 pi 修改文件或提交时，消息里写明授权范围：“授权修改 <目录绝对路径> 中的 <文件>，可以/不可以提交”。pi-automode 会拦截授权里没有点名目录的修改；worktree 会话写 worktree 的路径。
 - 长消息用 `-` 从 stdin 传入：
 
   ```bash

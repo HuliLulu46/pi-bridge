@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { beforeEach, test } from "node:test";
 import { piCalls, run, runAsync, sessionIdOf, setup } from "./helpers.ts";
@@ -83,6 +85,22 @@ test("watch 跟随进度直到 [done]", async () => {
   assert.equal(watched.code, 0);
   assert.match(watched.stdout, /\[reply\]\necho:slow\n\[done\]\n$/);
   assert.equal((await slow).code, 0);
+});
+
+test("watch 不会把上一次运行的日志当成本次结果（拿到锁与重写日志之间的空档）", async () => {
+  assert.equal(run(["send", "s1", "hello"]).code, 0);
+  await sleep(20);
+  // 模拟新的 send 刚拿到锁、还没重写日志：日志里仍是上一次运行的结束标记
+  const lock = join(home, "locks", "s1.lock");
+  writeFileSync(lock, String(process.pid));
+  const watched = runAsync(["watch", "s1"]);
+  await sleep(700);
+  writeFileSync(join(home, "logs", "s1.log"), "[start] new run\n[reply]\necho:new\n[done]\n");
+  const result = await watched;
+  rmSync(lock);
+  assert.equal(result.code, 0);
+  assert.doesNotMatch(result.stdout, /echo:hello/);
+  assert.match(result.stdout, /echo:new/);
 });
 
 test("watch 跟随到失败任务时以 [failed] 结束", () => {

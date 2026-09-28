@@ -1,6 +1,15 @@
-import { linkSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { linkSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+
+export interface WorktreeInfo {
+  /** 创建 worktree 的仓库根目录 */
+  repo: string;
+  branch: string;
+  /** 起点提交的完整哈希 */
+  base: string;
+}
 
 export interface SessionRecord {
   name: string;
@@ -8,6 +17,7 @@ export interface SessionRecord {
   cwd: string;
   createdAt: string;
   updatedAt: string;
+  worktree?: WorktreeInfo;
 }
 
 const NAME_RE = /^[A-Za-z0-9._-]+$/;
@@ -22,9 +32,10 @@ function isMissing(err: unknown): boolean {
   return (err as NodeJS.ErrnoException).code === "ENOENT";
 }
 
+/** 会话名同时用作文件名、目录名和 git 分支名的一部分 */
 export function assertName(name: string | undefined): asserts name is string {
-  if (!name || !NAME_RE.test(name)) {
-    throw new Error(`会话名只能包含字母、数字和 . _ -：${name ?? "(空)"}`);
+  if (!name || !NAME_RE.test(name) || name.startsWith(".") || name.includes("..") || name.endsWith(".lock")) {
+    throw new Error(`会话名只能包含字母、数字和 . _ -，且不能以 . 开头、不能包含 ..、不能以 .lock 结尾：${name ?? "(空)"}`);
   }
 }
 
@@ -38,6 +49,12 @@ function lockPath(name: string): string {
 
 export function logPath(name: string): string {
   return join(bridgeDir("logs"), `${name}.log`);
+}
+
+/** 进程号与随机后缀避免并发评审互相覆盖 */
+export function reviewPatchPath(): string {
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  return join(bridgeDir("reviews"), `${stamp}-${process.pid}-${randomBytes(4).toString("hex")}.patch`);
 }
 
 /** 常驻进程的 unix socket（sock）与 stdout/stderr 输出（err） */
@@ -88,6 +105,16 @@ function isAlive(pid: number): boolean {
     return true;
   } catch (err) {
     return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/** 锁文件是临时文件的硬链接，其修改时间即本次拿到锁的时间；无锁时返回 undefined */
+export function lockCreatedAt(name: string): number | undefined {
+  try {
+    return statSync(lockPath(name)).mtimeMs;
+  } catch (err) {
+    if (isMissing(err)) return undefined;
+    throw err;
   }
 }
 
