@@ -37,10 +37,38 @@ test("--cwd 与已绑定目录不一致时拒绝", () => {
   assert.match(result.stderr, /绑定在/);
 });
 
-test("消息为 - 时从 stdin 读取，-- 之后的参数透传给 pi", () => {
-  const result = run(["send", "s1", "-", "--", "--thinking", "low"], { input: "from stdin" });
+test("消息为 - 时从 stdin 读取；不接受透传的 pi 参数", () => {
+  const result = run(["send", "s1", "-"], { input: "from stdin" });
   assert.equal(result.stdout, "echo:from stdin\n");
-  assert.deepEqual(piCalls()[0]!.argv.slice(-4), ["--thinking", "low", "--", "from stdin"]);
+  assert.deepEqual(piCalls()[0]!.argv.slice(-2), ["--", "from stdin"]);
+
+  const rejected = run(["send", "s1", "hi", "--", "--tools", "bash"]);
+  assert.equal(rejected.code, 1);
+  assert.match(rejected.stderr, /不支持透传 pi 参数/);
+  assert.equal(piCalls().length, 1);
+});
+
+test("缺省以 advisor 运行：print 模式、只读参数，--model 与 --thinking 按次拼接", () => {
+  const result = run(["send", "s1", "--model", "m1", "--thinking", "low", "hello"]);
+  assert.equal(result.code, 0, result.stderr);
+  const argv = piCalls()[0]!.argv;
+  assert.ok(argv.includes("-p"));
+  assert.deepEqual(argv.slice(argv.indexOf("--no-extensions"), argv.indexOf("--no-extensions") + 3), [
+    "--no-extensions",
+    "--tools",
+    "read,grep,find,ls",
+  ]);
+  assert.deepEqual(argv.slice(argv.indexOf("--model"), argv.indexOf("--model") + 4), ["--model", "m1", "--thinking", "low"]);
+
+  run(["send", "s1", "--role", "advisor", "again"]);
+  assert.ok(!piCalls()[1]!.argv.includes("--model"));
+});
+
+test("--role 只接受 advisor 或 executor", () => {
+  const result = run(["send", "s1", "--role", "boss", "hello"]);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /--role 只能是 advisor 或 executor/);
+  assert.equal(run(["list"]).stdout, "（没有会话）\n");
 });
 
 test("同一会话运行中再次 send 会被锁拒绝", async () => {

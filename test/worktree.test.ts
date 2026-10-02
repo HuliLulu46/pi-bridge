@@ -13,8 +13,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  run(["stop", "w1"]);
-  run(["stop", "s1"]);
+  for (const name of ["w1", "s1", "s2"]) run(["stop", name]);
 });
 
 const worktreeOf = (name: string): string => join(work, ".pi-bridge", "worktrees", name);
@@ -138,8 +137,7 @@ test("worktree add 本身失败时回滚分支与 worktree", () => {
 });
 
 test("常驻进程中 pi 异常退出时，失败信息附改动清单", () => {
-  assert.equal(run(["start", "s1"]).code, 0);
-  const result = run(["send", "s1", "crash:z.txt"]);
+  const result = run(["send", "s1", "--role", "executor", "crash:z.txt"]);
   assert.equal(result.code, 1);
   assert.match(result.stderr, /pi 进程退出[\s\S]*本次运行改动了 1 个文件：\n\?\? z\.txt/);
 });
@@ -183,29 +181,34 @@ test("rm：worktree 已被手动删除时正常完成", () => {
   assert.doesNotMatch(gitIn(work, "worktree", "list"), /w1/);
 });
 
-test("改动清单：同一目录下附上本次运行改动的文件，无改动时不输出", () => {
-  assert.equal(run(["send", "s1", "hello"]).stdout, "echo:hello\n");
-  const result = run(["send", "s1", "write:new.txt"]);
+test("改动清单：同一目录下附上 executor 本次运行改动的文件，无改动时不输出", () => {
+  assert.equal(run(["send", "s1", "--role", "executor", "hello"]).stdout, "echo:hello\n");
+  const result = run(["send", "s1", "--role", "executor", "write:new.txt"]);
   assert.equal(result.stdout, "echo:write:new.txt\n\n[pi-bridge] 本次运行改动了 1 个文件：\n?? new.txt\n");
 });
 
 test("改动清单：worktree 中 pi 提交的文件标为已提交", () => {
-  const result = run(["send", "w1", "--worktree", "commit:c.txt"]);
+  const result = run(["send", "w1", "--worktree", "--role", "executor", "commit:c.txt"]);
   assert.equal(result.code, 0, result.stderr);
   assert.match(result.stdout, /本次运行改动了 1 个文件：\nA c\.txt \(已提交\)\n$/);
 });
 
-test("start --worktree：常驻进程在 worktree 中运行，每次 send 附改动清单", () => {
-  assert.equal(run(["start", "w1", "--worktree"]).code, 0);
-  assert.equal(piCalls()[0]!.cwd, worktreeOf("w1"));
-  const result = run(["send", "w1", "write:d.txt"]);
+test("executor --worktree：常驻进程在 worktree 中运行，每次 send 附改动清单", () => {
+  const result = run(["send", "w1", "--worktree", "--role", "executor", "write:d.txt"]);
   assert.equal(result.code, 0, result.stderr);
+  assert.equal(piCalls()[0]!.cwd, worktreeOf("w1"));
   assert.match(result.stdout, /本次运行改动了 1 个文件：\n\?\? d\.txt\n$/);
-  assert.equal(run(["send", "w1", "hello"]).stdout, "echo:hello\n");
+  assert.equal(run(["send", "w1", "--role", "executor", "hello"]).stdout, "echo:hello\n");
+});
+
+test("advisor 运行不附改动清单", () => {
+  const result = run(["send", "s1", "write:new.txt"]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stdout, "echo:write:new.txt\n");
 });
 
 test("非 git 目录不附改动清单", () => {
   writeFileSync(join(home, "marker"), "");
-  const result = run(["send", "s2", "--cwd", home, "write:y.txt"]);
+  const result = run(["send", "s2", "--role", "executor", "--cwd", home, "write:y.txt"]);
   assert.equal(result.stdout, "echo:write:y.txt\n");
 });

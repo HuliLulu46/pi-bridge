@@ -7,8 +7,8 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import type { DaemonOptions } from "./daemon.ts";
 import { preview, toolNotice } from "./events.ts";
-import { createWorktree, removeWorktree, rollbackError, trackChanges, type ReviewScope } from "./git.ts";
-import { runPi } from "./pi.ts";
+import { createWorktree, removeWorktree, rollbackError, type ReviewScope } from "./git.ts";
+import { ADVISOR_ARGS, modelArgs, runPi, type Role } from "./pi.ts";
 import { runReview } from "./review.ts";
 import { DONE, FAILED, formatAsk, openDaemon, request, type ClientRequest, type DaemonMessage } from "./protocol.ts";
 import {
@@ -27,23 +27,23 @@ import {
 } from "./store.ts";
 
 const USAGE = `用法：
-  pi-bridge send <会话名> [--cwd <目录>] [--model <模型>] [--worktree] <消息|-> [-- <pi 参数>...]
+  pi-bridge send <会话名> [--role advisor|executor] [--cwd <目录>] [--model <模型>] [--thinking <等级>] [--worktree] <消息|->
   pi-bridge watch <会话名>
   pi-bridge list
   pi-bridge rm <会话名> [--force]
   pi-bridge review [--staged | --base <分支>] [--cwd <目录>] [--focus <关注点>] [--model <模型>] [--thinking <等级>]
 
-常驻进程（任务中途干预、回答 pi 的提问）：
-  pi-bridge start <会话名> [--cwd <目录>] [--model <模型>] [--worktree] [-- <pi 参数>...]
+常驻进程（executor 会话的任务中途干预、回答 pi 的提问）：
   pi-bridge steer <会话名> <消息|->
   pi-bridge answer <会话名> <提问 id> <回答|->
   pi-bridge answer <会话名> <提问 id> --cancel
   pi-bridge abort <会话名>
   pi-bridge stop <会话名>
 
-消息写 - 时从 stdin 读取。首次 send 或 start 创建会话并绑定 cwd（默认当前目录），之后固定在该目录运行。
-创建会话时加 --worktree，会在 <仓库>/.pi-bridge/worktrees/<会话名> 建立分支为 pi/<会话名> 的 worktree 并在其中运行。
-常驻进程运行时 send 自动转给它：拿到回复时退出码为 0；pi 提问时打印提问并以退出码 2 退出，用 answer 回答后继续等待。`;
+消息写 - 时从 stdin 读取。首次 send 创建会话并绑定 cwd（默认当前目录），之后固定在该目录运行。
+--role 缺省为 advisor：只读，跑完即退出。executor 在常驻进程中运行，没有常驻进程时自动启动，空闲 30 分钟自动退出；
+pi 提问时 send 打印提问并以退出码 2 退出，用 answer 回答后继续等待。会话有常驻进程时，先 stop 才能以 advisor 发送。
+创建会话时加 --worktree，会在 <仓库>/.pi-bridge/worktrees/<会话名> 建立分支为 pi/<会话名> 的 worktree 并在其中运行。`;
 
 const EXIT_ASK = 2;
 /** watch 启动后等待任务开始的时长，覆盖 send 与 watch 同时启动时的先后顺序 */
@@ -57,11 +57,6 @@ const DAEMON_ENTRY = fileURLToPath(new URL("./daemon.ts", import.meta.url));
 
 function print(text: string): void {
   process.stdout.write(`${text}\n`);
-}
-
-function splitPassthrough(argv: string[]): [string[], string[]] {
-  const separator = argv.indexOf("--");
-  return separator === -1 ? [argv, []] : [argv.slice(0, separator), argv.slice(separator + 1)];
 }
 
 async function readStdin(): Promise<string> {
@@ -108,7 +103,7 @@ function ensureRecord(
 
 async function requireDaemon(name: string): Promise<Socket> {
   const socket = await openDaemon(name);
-  if (!socket) throw new Error(`会话 ${name} 没有运行中的常驻进程，先用 pi-bridge start 启动`);
+  if (!socket) throw new Error(`会话 ${name} 没有运行中的常驻进程，用 send --role executor 启动`);
   return socket;
 }
 
@@ -140,95 +135,120 @@ async function simpleRequest(name: string, req: ClientRequest): Promise<string> 
   throw new Error("与常驻进程的连接中断");
 }
 
+interface SendOptions {
+  cwd?: string;
+  model?: string;
+  thinking?: string;
+  worktree: boolean;
+}
+
 async function send(argv: string[]): Promise<number> {
-  const [own, passthrough] = splitPassthrough(argv);
+  if (argv.includes("--")) throw new Error("不支持透传 pi 参数，模型与思考等级用 --model、--thinking 指定");
   const { values, positionals } = parseArgs({
-    args: own,
+    args: argv,
     allowPositionals: true,
-    options: { cwd: { type: "string" }, model: { type: "string" }, worktree: { type: "boolean" } },
+    options: {
+      role: { type: "string", default: "advisor" },
+      cwd: { type: "string" },
+      model: { type: "string" },
+      thinking: { type: "string" },
+      worktree: { type: "boolean" },
+    },
   });
   const [name, raw] = positionals;
   assertName(name);
   if (positionals.length !== 2) throw new Error("需要恰好一条消息，含空格时请加引号，或用 - 从 stdin 读取");
+  const role = values.role as Role;
+  if (role !== "advisor" && role !== "executor") throw new Error(`--role 只能是 advisor 或 executor：${role}`);
   const message = await readMessage(raw);
+  const opts: SendOptions = {
+    cwd: values.cwd,
+    model: values.model,
+    thinking: values.thinking,
+    worktree: values.worktree ?? false,
+  };
+  return role === "advisor" ? sendAdvisor(name, message, opts) : sendExecutor(name, message, opts);
+}
 
+async function sendAdvisor(name: string, message: string, opts: SendOptions): Promise<number> {
   const daemon = await openDaemon(name);
   if (daemon) {
-    if (values.worktree) {
-      daemon.destroy();
-      throw new Error(`会话 ${name} 已存在，worktree 只能在创建会话时指定`);
-    }
-    const boundCwd = readRecord(name)?.cwd;
-    if (values.cwd && resolve(values.cwd) !== boundCwd) {
-      daemon.destroy();
-      throw new Error(`会话 ${name} 绑定在 ${boundCwd}，不能改到 ${resolve(values.cwd)}`);
-    }
-    if (values.model || passthrough.length > 0) {
-      daemon.destroy();
-      throw new Error("常驻进程运行中，--model 和 pi 参数只能在 start 时指定");
-    }
-    return awaitRun(name, request(daemon, { type: "prompt", message }));
+    daemon.destroy();
+    throw new Error(`会话 ${name} 有常驻进程，先 pi-bridge stop ${name}（正在执行的任务会被中止），再以 advisor 发送`);
   }
-
   const release = acquireLock(name);
   try {
-    const log = logPath(name);
-    writeFileSync(log, `[start] ${new Date().toISOString()} ${preview(message)}\n`);
-    const progress = (line: string): void => appendFileSync(log, `${line}\n`);
-
-    const { record, isNew } = ensureRecord(name, values.cwd, values.worktree ?? false);
-    const finishChanges = trackChanges(record.cwd);
-    const result = await runPi({
-      sessionId: sessionIdOf(record),
-      cwd: record.cwd,
-      message,
-      piArgs: [...(isNew ? ["--name", name] : []), ...(values.model ? ["--model", values.model] : []), ...passthrough],
-      onProgress: progress,
-    });
-    writeRecord({ ...record, updatedAt: new Date().toISOString() });
-
-    const notice = `${toolNotice(result.failedTools)}${finishChanges()}`;
-    if (result.ok) {
-      progress(`[reply]\n${result.reply}${notice}\n${DONE}`);
-      print(`${result.reply}${notice}`);
-      return 0;
-    }
-    progress(`[error]\n${result.error}${notice}\n${FAILED}`);
-    if (result.reply) print(result.reply);
-    process.stderr.write(`pi-bridge: ${result.error}${notice}\n`);
-    return 1;
+    const { record, isNew } = ensureRecord(name, opts.cwd, opts.worktree);
+    return await runPrint(record, isNew, message, [...ADVISOR_ARGS, ...modelArgs(opts.model, opts.thinking)]);
   } finally {
     release();
   }
 }
 
-async function start(argv: string[]): Promise<number> {
-  const [own, passthrough] = splitPassthrough(argv);
-  const { values, positionals } = parseArgs({
-    args: own,
-    allowPositionals: true,
-    options: { cwd: { type: "string" }, model: { type: "string" }, worktree: { type: "boolean" } },
+/** 以 print 模式运行一轮；调用方须持有会话锁 */
+async function runPrint(record: SessionRecord, isNew: boolean, message: string, piArgs: string[]): Promise<number> {
+  const log = logPath(record.name);
+  writeFileSync(log, `[start] ${new Date().toISOString()} ${preview(message)}\n`);
+  const progress = (line: string): void => appendFileSync(log, `${line}\n`);
+  const result = await runPi({
+    sessionId: sessionIdOf(record),
+    cwd: record.cwd,
+    message,
+    piArgs: [...(isNew ? ["--name", record.name] : []), ...piArgs],
+    onProgress: progress,
   });
-  const [name] = positionals;
-  assertName(name);
-  if (positionals.length !== 1) throw new Error("start 只接受一个会话名");
+  writeRecord({ ...record, updatedAt: new Date().toISOString() });
+
+  const notice = toolNotice(result.failedTools);
+  if (result.ok) {
+    progress(`[reply]\n${result.reply}${notice}\n${DONE}`);
+    print(`${result.reply}${notice}`);
+    return 0;
+  }
+  progress(`[error]\n${result.error}${notice}\n${FAILED}`);
+  if (result.reply) print(result.reply);
+  process.stderr.write(`pi-bridge: ${result.error}${notice}\n`);
+  return 1;
+}
+
+async function sendExecutor(name: string, message: string, opts: SendOptions): Promise<number> {
+  let daemon = await openDaemon(name);
+  if (daemon) {
+    const boundCwd = readRecord(name)?.cwd;
+    const conflict = opts.worktree
+      ? `会话 ${name} 已存在，worktree 只能在创建会话时指定`
+      : opts.cwd && resolve(opts.cwd) !== boundCwd
+        ? `会话 ${name} 绑定在 ${boundCwd}，不能改到 ${resolve(opts.cwd)}`
+        : opts.model || opts.thinking
+          ? "常驻进程运行中，--model 与 --thinking 只在启动常驻进程时生效"
+          : undefined;
+    if (conflict) {
+      daemon.destroy();
+      throw new Error(conflict);
+    }
+  } else {
+    daemon = await startDaemon(name, opts);
+  }
+  return awaitRun(name, request(daemon, { type: "prompt", message }));
+}
+
+/**
+ * 启动常驻进程并返回与它的连接。记录在会话锁内创建，释放锁后由常驻进程自己拿锁；
+ * 中间被其他命令抢先拿锁或删掉记录时，常驻进程退出，错误原因来自它的输出
+ */
+async function startDaemon(name: string, opts: SendOptions): Promise<Socket> {
   const socketFile = runPath(name, "sock");
   if (Buffer.byteLength(socketFile) > SOCKET_PATH_MAX) throw new Error(`会话名过长，socket 路径超过 ${SOCKET_PATH_MAX} 字节：${socketFile}`);
-  const running = await openDaemon(name);
-  if (running) {
-    running.destroy();
-    throw new Error(`会话 ${name} 的常驻进程已在运行`);
-  }
 
   const release = acquireLock(name);
-  let ensured: ReturnType<typeof ensureRecord>;
+  let isNew: boolean;
   try {
-    ensured = ensureRecord(name, values.cwd, values.worktree ?? false);
+    ({ isNew } = ensureRecord(name, opts.cwd, opts.worktree));
   } finally {
     release();
   }
 
-  const options: DaemonOptions = { isNew: ensured.isNew, model: values.model, piArgs: passthrough };
+  const options: DaemonOptions = { isNew, model: opts.model, thinking: opts.thinking };
   const errFile = runPath(name, "err");
   const fd = openSync(errFile, "w");
   const child = spawn(process.execPath, [DAEMON_ENTRY, name, JSON.stringify(options)], {
@@ -243,11 +263,7 @@ async function start(argv: string[]): Promise<number> {
   const deadline = Date.now() + DAEMON_READY_TIMEOUT_MS;
   while (Date.now() < deadline) {
     const socket = await openDaemon(name);
-    if (socket) {
-      socket.destroy();
-      print(`已启动常驻进程 ${name}（pid ${child.pid}，目录 ${ensured.record.cwd}）`);
-      return 0;
-    }
+    if (socket) return socket;
     if (exited) throw new Error(`常驻进程启动失败：\n${readFileSync(errFile, "utf8").trim()}`);
     await sleep(100);
   }
@@ -255,15 +271,20 @@ async function start(argv: string[]): Promise<number> {
   throw new Error(`常驻进程 ${DAEMON_READY_TIMEOUT_MS / 1000} 秒内未就绪，输出见 ${errFile}`);
 }
 
-async function stop(argv: string[]): Promise<number> {
-  const [name] = argv;
-  assertName(name);
+/** 请求常驻进程停止，等到它释放会话锁 */
+async function stopDaemon(name: string): Promise<void> {
   await simpleRequest(name, { type: "stop" });
   const deadline = Date.now() + DAEMON_STOP_TIMEOUT_MS;
   while (lockHolder(name) !== undefined) {
     if (Date.now() > deadline) throw new Error(`常驻进程 ${DAEMON_STOP_TIMEOUT_MS / 1000} 秒内未退出`);
     await sleep(100);
   }
+}
+
+async function stop(argv: string[]): Promise<number> {
+  const [name] = argv;
+  assertName(name);
+  await stopDaemon(name);
   print(`已停止常驻进程 ${name}`);
   return 0;
 }
@@ -387,10 +408,15 @@ function list(): number {
   return 0;
 }
 
-function rm(argv: string[]): number {
+async function rm(argv: string[]): Promise<number> {
   const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: { force: { type: "boolean" } } });
   const [name] = positionals;
   assertName(name);
+  const daemon = await openDaemon(name);
+  if (daemon) {
+    daemon.destroy();
+    await stopDaemon(name);
+  }
   const release = acquireLock(name);
   try {
     const record = readRecord(name);
@@ -445,7 +471,6 @@ const commands: Record<string, (argv: string[]) => number | Promise<number>> = {
   watch,
   list,
   rm,
-  start,
   stop,
   steer,
   answer,

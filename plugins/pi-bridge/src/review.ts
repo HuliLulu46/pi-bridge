@@ -1,7 +1,7 @@
 import { rmSync, writeFileSync } from "node:fs";
 import type { RunResult } from "./events.ts";
 import { collectReview, NUL_MARKER, type ReviewPatch, type ReviewScope } from "./git.ts";
-import { runPi } from "./pi.ts";
+import { ADVISOR_ARGS, modelArgs, runPi } from "./pi.ts";
 import { reviewPatchPath } from "./store.ts";
 
 export interface ReviewOptions {
@@ -13,8 +13,6 @@ export interface ReviewOptions {
 }
 
 const INLINE_LIMIT = 200 * 1024;
-/** 只读由工具白名单保证；不加载扩展，避免扩展改变工具集 */
-const READ_ONLY_ARGS = ["--no-extensions", "--tools", "read,grep,find,ls"];
 /** pi 的 read 工具单次最多返回 50 KB，读不了超过该大小的单行；4000 个码点最多 16 KB */
 const WRAP_WIDTH = 4000;
 const CONTINUATION = "↩";
@@ -90,11 +88,7 @@ export async function runReview(opts: ReviewOptions): Promise<RunResult> {
     return await runPi({
       cwd: review.root,
       message: buildMessage(review, patchFile, opts),
-      piArgs: [
-        ...READ_ONLY_ARGS,
-        ...(opts.model ? ["--model", opts.model] : []),
-        ...(opts.thinking ? ["--thinking", opts.thinking] : []),
-      ],
+      piArgs: [...ADVISOR_ARGS, ...modelArgs(opts.model, opts.thinking)],
       onProgress: () => {},
     });
   } finally {

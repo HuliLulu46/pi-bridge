@@ -4,14 +4,14 @@ import { appendFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
 import { createLineSplitter, createRunTracker, parseEvent, preview, toolNotice, type PiEvent } from "./events.ts";
 import { trackChanges } from "./git.ts";
-import { PI_ENV, piBin } from "./pi.ts";
+import { modelArgs, PI_ENV, piBin } from "./pi.ts";
 import { DONE, FAILED, formatAsk, type Ask, type AskMethod, type ClientRequest, type DaemonMessage } from "./protocol.ts";
 import { acquireLock, logPath, readRecord, runPath, sessionIdOf, writeRecord } from "./store.ts";
 
 export interface DaemonOptions {
   isNew: boolean;
   model?: string;
-  piArgs: string[];
+  thinking?: string;
 }
 
 const ASK_TIMEOUT_MS = Number(process.env.PI_BRIDGE_ASK_TIMEOUT_MS ?? 10 * 60_000);
@@ -57,10 +57,9 @@ const pi = spawn(
     "--session-id",
     sessionIdOf(record),
     ...(options.isNew ? ["--name", name] : []),
-    ...(options.model ? ["--model", options.model] : []),
+    ...modelArgs(options.model, options.thinking),
     "--append-system-prompt",
     SYSTEM_PROMPT,
-    ...options.piArgs,
   ],
   { cwd: record.cwd, env: PI_ENV, stdio: ["pipe", "pipe", "inherit"] },
 );
@@ -199,7 +198,7 @@ function onPiEvent(event: PiEvent): void {
     } else {
       // 启动期与空闲期没有人能回答，不取消的话 pi 会一直等待
       respondDialog(event.id!, { cancelled: true });
-      appendFileSync(log, `[dialog-cancelled] ${event.method} ${preview(event.title ?? "")}\n`);
+      process.stderr.write(`[dialog-cancelled] ${event.method} ${preview(event.title ?? "")}\n`);
     }
     return;
   }
