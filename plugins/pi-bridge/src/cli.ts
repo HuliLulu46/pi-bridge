@@ -46,8 +46,8 @@ pi 提问时 send 打印提问并以退出码 2 退出，用 answer 回答后继
 创建会话时加 --worktree，会在 <仓库>/.pi-bridge/worktrees/<会话名> 建立分支为 pi/<会话名> 的 worktree 并在其中运行。`;
 
 const EXIT_ASK = 2;
-/** watch 启动后等待任务开始的时长，覆盖 send 与 watch 同时启动时的先后顺序 */
-const WATCH_START_WAIT_MS = Number(process.env.PI_BRIDGE_WATCH_WAIT_MS ?? 10_000);
+/** watch 启动后等待任务开始的时长，覆盖 send 与 watch 同时启动时的先后顺序，以及常驻进程的启动超时 */
+const WATCH_START_WAIT_MS = Number(process.env.PI_BRIDGE_WATCH_WAIT_MS ?? 70_000);
 const WATCH_POLL_MS = 500;
 const DAEMON_READY_TIMEOUT_MS = 60_000;
 const DAEMON_STOP_TIMEOUT_MS = 10_000;
@@ -319,17 +319,29 @@ async function answer(argv: string[]): Promise<number> {
   return awaitRun(name, request(await requireDaemon(name), req));
 }
 
+/**
+ * 等待期内反复查找正在进行的运行：常驻进程能连上就交给它（它在空闲时会继续等新运行开始），
+ * print 模式的日志属于当前持锁的运行就跟随日志。等待期覆盖常驻进程的启动超时，
+ * 也容许 watch 先于首次 send 创建会话记录
+ */
 async function watch(argv: string[]): Promise<number> {
   const [name] = argv;
   assertName(name);
+  const deadline = Date.now() + WATCH_START_WAIT_MS;
+  for (;;) {
+    const daemon = await openDaemon(name);
+    if (daemon) return watchDaemon(name, daemon, Math.max(0, deadline - Date.now()));
+    if (lockHolder(name) !== undefined && logBelongsToCurrentRun(name, logPath(name))) return followLog(name);
+    if (Date.now() >= deadline) break;
+    await sleep(200);
+  }
   if (!readRecord(name)) throw new Error(`会话不存在：${name}`);
-  const daemon = await openDaemon(name);
-  return daemon ? watchDaemon(name, daemon) : watchLog(name);
+  return printLastRun(name, lastLogLines(name));
 }
 
-async function watchDaemon(name: string, daemon: Socket): Promise<number> {
+async function watchDaemon(name: string, daemon: Socket, waitStartMs: number): Promise<number> {
   let last: string | undefined;
-  for await (const message of request(daemon, { type: "watch", waitStartMs: WATCH_START_WAIT_MS })) {
+  for await (const message of request(daemon, { type: "watch", waitStartMs })) {
     if (message.type === "idle") return printLastRun(name, message.lines);
     if (message.type !== "line") continue;
     print(message.line);
@@ -365,13 +377,9 @@ function logBelongsToCurrentRun(name: string, log: string): boolean {
   return lockedAt !== undefined && existsSync(log) && statSync(log).mtimeMs >= lockedAt;
 }
 
-async function watchLog(name: string): Promise<number> {
+/** 跟随 print 模式正在进行的运行，直到结束标记 */
+async function followLog(name: string): Promise<number> {
   const log = logPath(name);
-  const waitUntil = Date.now() + WATCH_START_WAIT_MS;
-  while (!(lockHolder(name) !== undefined && logBelongsToCurrentRun(name, log)) && Date.now() < waitUntil) {
-    await sleep(200);
-  }
-
   let offset = 0;
   for (;;) {
     const running = lockHolder(name) !== undefined;
@@ -391,6 +399,12 @@ async function watchLog(name: string): Promise<number> {
     }
     await sleep(WATCH_POLL_MS);
   }
+}
+
+function lastLogLines(name: string): string[] {
+  const log = logPath(name);
+  if (!existsSync(log)) return [];
+  return readFileSync(log, "utf8").split("\n").slice(0, -1);
 }
 
 function list(): number {

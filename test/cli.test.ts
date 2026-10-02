@@ -132,11 +132,31 @@ test("watch 不会把上一次运行的日志当成本次结果（拿到锁与�
   assert.match(result.stdout, /echo:new/);
 });
 
-test("watch 跟随到失败任务时以 [failed] 结束", () => {
+test("没有运行时 watch 等待期满后回放上一次运行，退出码随上一次的结果", () => {
   run(["send", "s1", "fail"]);
-  const result = run(["watch", "s1"]);
-  assert.equal(result.code, 1);
-  assert.match(result.stdout, /\[failed\]/);
+  const failed = run(["watch", "s1"]);
+  assert.equal(failed.code, 1);
+  assert.match(failed.stdout, /^\[idle\] 会话 s1 当前没有任务在运行，以下是上一次运行的记录\n\[start\] /);
+  assert.match(failed.stdout, /\[failed\]\n$/);
+
+  run(["send", "s1", "hello"]);
+  const done = run(["watch", "s1"]);
+  assert.equal(done.code, 0);
+  assert.match(done.stdout, /echo:hello\n\[done\]\n$/);
+});
+
+test("watch 可以先于首次 send 启动；等待期满仍没有会话时报错", async () => {
+  const watched = runAsync(["watch", "s1"]);
+  await sleep(300);
+  const sent = runAsync(["send", "s1", "slow"]);
+  const result = await watched;
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /^\[start\] .*slow[\s\S]*echo:slow\n\[done\]\n$/);
+  await sent;
+
+  const missing = run(["watch", "nosuch"]);
+  assert.equal(missing.code, 1);
+  assert.match(missing.stderr, /会话不存在：nosuch/);
 });
 
 test("list 列出会话，rm 后同名 send 续接同一 session-id", () => {

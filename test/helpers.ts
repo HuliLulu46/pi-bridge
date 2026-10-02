@@ -53,6 +53,7 @@ function env(): NodeJS.ProcessEnv {
     ...GIT_ENV,
     PI_BIN: FAKE_PI,
     PI_BRIDGE_HOME: home,
+    PI_BRIDGE_WATCH_WAIT_MS: "3000",
     FAKE_PI_CALLS: join(home, "calls.jsonl"),
     ...extraEnv,
   };

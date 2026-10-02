@@ -169,6 +169,30 @@ test("等待期内开始的新运行被 watch 跟随，不输出上一次运行�
   await slow;
 });
 
+test("watch 先于首次 executor send 启动时，跟随自动启动的常驻进程直到 [done]", async () => {
+  ({ home } = setup());
+  const watched = runAsync(["watch", "s1"]);
+  await sleep(300);
+  const sent = execAsync("slow");
+  const result = await watched;
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /^\[start\] .*slow[\s\S]*echo:slow steer:\n\[done\]\n$/);
+  assert.equal((await sent).code, 0);
+});
+
+test("跟随中的常驻进程被 stop 时，watch 以 [failed] 结束", async () => {
+  begin();
+  const sent = execAsync("slow");
+  await sleep(300);
+  const watched = runAsync(["watch", "s1"]);
+  await sleep(300);
+  assert.equal(run(["stop", "s1"]).code, 0);
+  const result = await watched;
+  assert.equal(result.code, 1);
+  assert.match(result.stdout, /pi 进程退出[\s\S]*\[failed\]\n$/);
+  assert.equal((await sent).code, 1);
+});
+
 test("停止中的常驻进程拒绝新请求", async () => {
   begin({ FAKE_PI_RPC_EXIT_DELAY_MS: "1500" });
   process.env.PI_BRIDGE_HOME = home;
