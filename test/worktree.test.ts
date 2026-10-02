@@ -19,12 +19,14 @@ afterEach(() => {
 
 const worktreeOf = (name: string): string => join(work, ".pi-bridge", "worktrees", name);
 
-test("会话名：拒绝以 . 开头、含 ..、以 .lock 结尾的名字", () => {
-  for (const name of [".", "..", ".x", "a..b", "x.lock"]) {
+test("会话名：拒绝首尾不是字母或数字、含 ..、以 .lock 结尾的名字，且不留下记录", () => {
+  for (const name of [".", "..", ".x", "_task", "task-", "task.", "a..b", "x.lock"]) {
     const result = run(["send", name, "hi"]);
     assert.equal(result.code, 1, name);
     assert.match(result.stderr, /会话名/, name);
   }
+  assert.equal(run(["list"]).stdout, "（没有会话）\n");
+  assert.equal(piCalls().length, 0);
 });
 
 test("send --worktree 创建 worktree 与分支，pi 在 worktree 中运行", () => {

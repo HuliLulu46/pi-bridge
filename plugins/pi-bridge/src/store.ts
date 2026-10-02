@@ -13,14 +13,16 @@ export interface WorktreeInfo {
 
 export interface SessionRecord {
   name: string;
-  id: string;
+  /** 只出现在旧记录中；新记录以会话名作为 pi 的 session-id */
+  id?: string;
   cwd: string;
   createdAt: string;
   updatedAt: string;
   worktree?: WorktreeInfo;
 }
 
-const NAME_RE = /^[A-Za-z0-9._-]+$/;
+/** 与 pi 的 session-id 规则一致 */
+const NAME_RE = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
 
 function bridgeDir(sub: string): string {
   const dir = join(process.env.PI_BRIDGE_HOME ?? join(homedir(), ".pi-bridge"), sub);
@@ -34,9 +36,15 @@ function isMissing(err: unknown): boolean {
 
 /** 会话名同时用作文件名、目录名和 git 分支名的一部分 */
 export function assertName(name: string | undefined): asserts name is string {
-  if (!name || !NAME_RE.test(name) || name.startsWith(".") || name.includes("..") || name.endsWith(".lock")) {
-    throw new Error(`会话名只能包含字母、数字和 . _ -，且不能以 . 开头、不能包含 ..、不能以 .lock 结尾：${name ?? "(空)"}`);
+  if (!name || !NAME_RE.test(name) || name.includes("..") || name.endsWith(".lock")) {
+    throw new Error(
+      `会话名只能包含字母、数字和 . _ -，首尾必须是字母或数字，且不能包含 ..、不能以 .lock 结尾：${name ?? "(空)"}`,
+    );
   }
+}
+
+export function sessionIdOf(record: SessionRecord): string {
+  return record.id ?? record.name;
 }
 
 function recordPath(name: string): string {

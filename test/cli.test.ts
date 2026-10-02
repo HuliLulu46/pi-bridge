@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { beforeEach, test } from "node:test";
@@ -12,7 +12,7 @@ beforeEach(() => {
   ({ home, work } = setup());
 });
 
-test("首次 send 创建会话，之后在任意目录 send 都复用同一 id 与 cwd", () => {
+test("首次 send 创建会话，之后在任意目录 send 都以会话名作为 session-id 并复用 cwd", () => {
   const first = run(["send", "s1", "hello"]);
   assert.equal(first.code, 0, first.stderr);
   assert.equal(first.stdout, "echo:hello\n");
@@ -21,7 +21,8 @@ test("首次 send 创建会话，之后在任意目录 send 都复用同一 id �
   assert.equal(second.code, 0, second.stderr);
 
   const [a, b] = piCalls();
-  assert.equal(sessionIdOf(a!.argv), sessionIdOf(b!.argv));
+  assert.equal(sessionIdOf(a!.argv), "s1");
+  assert.equal(sessionIdOf(b!.argv), "s1");
   assert.equal(a!.cwd, work);
   assert.equal(b!.cwd, work);
   assert.ok(a!.argv.includes("--name"));
@@ -110,14 +111,32 @@ test("watch 跟随到失败任务时以 [failed] 结束", () => {
   assert.match(result.stdout, /\[failed\]/);
 });
 
-test("list 列出会话，rm 后再 send 会新建会话", () => {
+test("list 列出会话，rm 后同名 send 续接同一 session-id", () => {
   run(["send", "s1", "hello"]);
-  assert.match(run(["list"]).stdout, /^s1\tidle\t/);
+  assert.match(run(["list"]).stdout, /^s1\tidle\t.*\ts1$/m);
 
-  assert.equal(run(["rm", "s1"]).code, 0);
+  const removed = run(["rm", "s1"]);
+  assert.equal(removed.code, 0);
+  assert.match(removed.stdout, /同名再 send 会续接/);
   assert.equal(run(["list"]).stdout, "（没有会话）\n");
 
   run(["send", "s1", "hello"]);
   const [a, b] = piCalls();
-  assert.notEqual(sessionIdOf(a!.argv), sessionIdOf(b!.argv));
+  assert.equal(sessionIdOf(a!.argv), "s1");
+  assert.equal(sessionIdOf(b!.argv), "s1");
+});
+
+test("含 id 字段的旧记录以该 id 作为 session-id", () => {
+  const id = "4c42ca73-2913-487d-81f4-525b8d8f6d62";
+  const now = new Date().toISOString();
+  mkdirSync(join(home, "sessions"), { recursive: true });
+  writeFileSync(
+    join(home, "sessions", "old.json"),
+    JSON.stringify({ name: "old", id, cwd: work, createdAt: now, updatedAt: now }),
+  );
+
+  const result = run(["send", "old", "hello"]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(sessionIdOf(piCalls()[0]!.argv), id);
+  assert.match(run(["list"]).stdout, new RegExp(`^old\\tidle\\t.*\\t${id}$`, "m"));
 });

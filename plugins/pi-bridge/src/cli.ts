@@ -1,5 +1,4 @@
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import { appendFileSync, closeSync, existsSync, openSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import type { Socket } from "node:net";
 import { resolve } from "node:path";
@@ -22,6 +21,7 @@ import {
   readRecord,
   removeRecord,
   runPath,
+  sessionIdOf,
   writeRecord,
   type SessionRecord,
 } from "./store.ts";
@@ -91,7 +91,7 @@ function ensureRecord(
   if (existing) return { record: existing, isNew: false };
   if (!existsSync(cwd)) throw new Error(`目录不存在：${cwd}`);
   const now = new Date().toISOString();
-  const base = { name, id: randomUUID(), createdAt: now, updatedAt: now };
+  const base = { name, createdAt: now, updatedAt: now };
   if (!worktree) {
     const record = { ...base, cwd };
     writeRecord(record);
@@ -180,7 +180,7 @@ async function send(argv: string[]): Promise<number> {
     const { record, isNew } = ensureRecord(name, values.cwd, values.worktree ?? false);
     const finishChanges = trackChanges(record.cwd);
     const result = await runPi({
-      sessionId: record.id,
+      sessionId: sessionIdOf(record),
       cwd: record.cwd,
       message,
       piArgs: [...(isNew ? ["--name", name] : []), ...(values.model ? ["--model", values.model] : []), ...passthrough],
@@ -388,7 +388,7 @@ function list(): number {
     const held = lockHolder(record.name) !== undefined;
     const status = !held ? "idle" : existsSync(runPath(record.name, "sock")) ? "daemon" : "running";
     const worktree = record.worktree ? [`${record.worktree.branch}@${record.worktree.base.slice(0, 12)}`] : [];
-    print([record.name, status, record.updatedAt, record.cwd, record.id, ...worktree].join("\t"));
+    print([record.name, status, record.updatedAt, record.cwd, sessionIdOf(record), ...worktree].join("\t"));
   }
   return 0;
 }
@@ -404,7 +404,7 @@ function rm(argv: string[]): number {
     if (record.worktree) removeWorktree(record.worktree, record.cwd, values.force ?? false);
     removeRecord(name);
     const worktreeNote = record.worktree ? `；worktree 已删除，分支 ${record.worktree.branch} 保留` : "";
-    print(`已删除会话映射 ${name}，pi 会话文件（${record.id}）仍保留${worktreeNote}`);
+    print(`已删除会话 ${name}，pi 会话文件（${sessionIdOf(record)}）仍保留，同名再 send 会续接${worktreeNote}`);
     return 0;
   } finally {
     release();

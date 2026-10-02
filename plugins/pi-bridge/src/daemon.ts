@@ -6,7 +6,7 @@ import { createLineSplitter, createRunTracker, parseEvent, preview, toolNotice, 
 import { trackChanges } from "./git.ts";
 import { PI_ENV, piBin } from "./pi.ts";
 import { confirmText, DONE, FAILED, formatAsk, type Ask, type AskMethod, type ClientRequest, type DaemonMessage } from "./protocol.ts";
-import { acquireLock, logPath, readRecord, runPath, writeRecord } from "./store.ts";
+import { acquireLock, logPath, readRecord, runPath, sessionIdOf, writeRecord } from "./store.ts";
 
 export interface DaemonOptions {
   isNew: boolean;
@@ -37,7 +37,7 @@ const pi = spawn(
     "--mode",
     "rpc",
     "--session-id",
-    record.id,
+    sessionIdOf(record),
     ...(options.isNew ? ["--name", name] : []),
     ...(options.model ? ["--model", options.model] : []),
     "--append-system-prompt",
