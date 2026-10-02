@@ -9,7 +9,7 @@ import type { DaemonOptions } from "./daemon.ts";
 import { preview, toolNotice } from "./events.ts";
 import { createWorktree, removeWorktree, rollbackError, type ReviewScope } from "./git.ts";
 import { ADVISOR_ARGS, modelArgs, runPi, type Role } from "./pi.ts";
-import { runReview } from "./review.ts";
+import { prepareReview } from "./review.ts";
 import { DONE, FAILED, formatAsk, openDaemon, request, type ClientRequest, type DaemonMessage } from "./protocol.ts";
 import {
   acquireLock,
@@ -185,8 +185,14 @@ async function sendAdvisor(name: string, message: string, opts: SendOptions): Pr
   }
 }
 
-/** 以 print 模式运行一轮；调用方须持有会话锁 */
-async function runPrint(record: SessionRecord, isNew: boolean, message: string, piArgs: string[]): Promise<number> {
+/** 以 print 模式运行一轮；调用方须持有会话锁。footer 附在回复与错误信息末尾 */
+async function runPrint(
+  record: SessionRecord,
+  isNew: boolean,
+  message: string,
+  piArgs: string[],
+  footer = "",
+): Promise<number> {
   const log = logPath(record.name);
   writeFileSync(log, `[start] ${new Date().toISOString()} ${preview(message)}\n`);
   const progress = (line: string): void => appendFileSync(log, `${line}\n`);
@@ -199,7 +205,7 @@ async function runPrint(record: SessionRecord, isNew: boolean, message: string, 
   });
   writeRecord({ ...record, updatedAt: new Date().toISOString() });
 
-  const notice = toolNotice(result.failedTools);
+  const notice = `${toolNotice(result.failedTools)}${footer}`;
   if (result.ok) {
     progress(`[reply]\n${result.reply}${notice}\n${DONE}`);
     print(`${result.reply}${notice}`);
@@ -463,21 +469,29 @@ async function review(argv: string[]): Promise<number> {
     : values.base
       ? { kind: "base", ref: values.base }
       : { kind: "head" };
-  const result = await runReview({
-    cwd: resolve(values.cwd ?? process.cwd()),
-    scope,
-    focus: values.focus,
-    model: values.model,
-    thinking: values.thinking,
-  });
-  const notice = toolNotice(result.failedTools);
-  if (result.ok) {
-    print(`${result.reply}${notice}`);
-    return 0;
+  const prepared = prepareReview({ cwd: resolve(values.cwd ?? process.cwd()), scope, focus: values.focus });
+  try {
+    const name = reviewSessionName();
+    const release = acquireLock(name);
+    try {
+      const now = new Date().toISOString();
+      const record: SessionRecord = { name, cwd: prepared.root, createdAt: now, updatedAt: now };
+      writeRecord(record);
+      const footer = `\n\n[pi-bridge] 评审会话：${name}，追问用 pi-bridge send ${name} <消息>`;
+      const piArgs = [...ADVISOR_ARGS, ...modelArgs(values.model, values.thinking)];
+      return await runPrint(record, true, prepared.message, piArgs, footer);
+    } finally {
+      release();
+    }
+  } finally {
+    prepared.cleanup();
   }
-  if (result.reply) print(result.reply);
-  process.stderr.write(`pi-bridge: ${result.error}${notice}\n`);
-  return 1;
+}
+
+/** 如 review-20261001T013000-4242：进程号避免同一秒内的两次评审撞名 */
+function reviewSessionName(): string {
+  const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "");
+  return `review-${stamp}-${process.pid}`;
 }
 
 const commands: Record<string, (argv: string[]) => number | Promise<number>> = {

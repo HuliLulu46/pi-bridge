@@ -138,6 +138,17 @@ test("collectReview：默认范围含已跟踪改动与未跟踪文件内容", (
   assert.match(review.stat, /a\.txt/);
 });
 
+test("collectReview：不执行仓库配置的文本转换程序", () => {
+  writeFileSync(join(repo, ".gitattributes"), "*.txt diff=conv\n");
+  gitIn(repo, "add", ".gitattributes");
+  gitIn(repo, "commit", "-q", "-m", "attributes");
+  gitIn(repo, "config", "diff.conv.textconv", "sed s/^/CONVERTED:/");
+  writeFileSync(join(repo, "a.txt"), "real change\n");
+  const review = collectReview(repo, { kind: "head" })!;
+  assert.match(review.patch, /\+real change/);
+  assert.doesNotMatch(review.patch, /CONVERTED/);
+});
+
 test("collectReview：--staged 只含暂存改动，不含未跟踪文件", () => {
   writeFileSync(join(repo, "a.txt"), "staged\n");
   gitIn(repo, "add", "a.txt");

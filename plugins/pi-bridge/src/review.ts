@@ -1,15 +1,11 @@
 import { rmSync, writeFileSync } from "node:fs";
-import type { RunResult } from "./events.ts";
 import { collectReview, NUL_MARKER, type ReviewPatch, type ReviewScope } from "./git.ts";
-import { ADVISOR_ARGS, modelArgs, runPi } from "./pi.ts";
 import { reviewPatchPath } from "./store.ts";
 
 export interface ReviewOptions {
   cwd: string;
   scope: ReviewScope;
   focus?: string;
-  model?: string;
-  thinking?: string;
 }
 
 const INLINE_LIMIT = 200 * 1024;
@@ -80,18 +76,23 @@ function writePatchFile(patch: string): string {
   return file;
 }
 
-export async function runReview(opts: ReviewOptions): Promise<RunResult> {
+export interface PreparedReview {
+  /** 仓库根目录，评审会话在此运行 */
+  root: string;
+  message: string;
+  /** 删除补丁文件；评审运行结束后调用 */
+  cleanup: () => void;
+}
+
+export function prepareReview(opts: ReviewOptions): PreparedReview {
   const review = collectReview(opts.cwd, opts.scope);
   if (!review) throw new Error("没有可评审的改动");
   const patchFile = Buffer.byteLength(review.patch) > INLINE_LIMIT ? writePatchFile(review.patch) : undefined;
-  try {
-    return await runPi({
-      cwd: review.root,
-      message: buildMessage(review, patchFile, opts),
-      piArgs: [...ADVISOR_ARGS, ...modelArgs(opts.model, opts.thinking)],
-      onProgress: () => {},
-    });
-  } finally {
-    if (patchFile) rmSync(patchFile, { force: true });
-  }
+  return {
+    root: review.root,
+    message: buildMessage(review, patchFile, opts),
+    cleanup: () => {
+      if (patchFile) rmSync(patchFile, { force: true });
+    },
+  };
 }

@@ -322,8 +322,9 @@ export function collectReview(cwd: string, scope: ReviewScope): ReviewPatch | un
   const root = repoRoot(cwd);
   if (!root) throw new Error(`不在 git 仓库内：${cwd}`);
   const range = rangeArgs(root, scope);
-  const diff = git(root, ["diff", ...range, "--no-renames", "--no-color", "--no-ext-diff"]);
-  const stat = git(root, ["diff", ...range, "--no-renames", "--no-color", "--stat"]);
+  // 不让仓库配置的外部 diff 与文本转换程序参与：它们会执行任意命令，并让补丁与真实内容不符
+  const diff = git(root, ["diff", ...range, "--no-renames", "--no-color", "--no-ext-diff", "--no-textconv"]);
+  const stat = git(root, ["diff", ...range, "--no-renames", "--no-color", "--no-textconv", "--stat"]);
   const { sections, summary } = scope.kind === "staged" ? { sections: [], summary: [] } : untrackedFiles(root);
   if (diff.trim() === "" && summary.length === 0) return undefined;
   const patch = [diff, ...sections].filter((part) => part !== "").join("\n").replaceAll("\0", NUL_MARKER);

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { beforeEach, test } from "node:test";
-import { gitIn, initRepo, piCalls, run, setup } from "./helpers.ts";
+import { gitIn, initRepo, piCalls, run, sessionIdOf, setup } from "./helpers.ts";
 
 let home: string;
 let work: string;
@@ -16,7 +16,7 @@ function messageOf(argv: string[]): string {
   return argv.at(-1)!;
 }
 
-test("review：只读运行，不写会话，消息含 diff 与未跟踪文件", () => {
+test("review：走 advisor 路径，创建评审会话，消息含 diff 与未跟踪文件，回复末尾附追问方式", () => {
   writeFileSync(join(work, "a.txt"), "changed line\n");
   writeFileSync(join(work, "new.txt"), "brand new\n");
   const result = run(["review", "--model", "m1", "--thinking", "low", "--focus", "看并发问题"]);
@@ -26,8 +26,12 @@ test("review：只读运行，不写会话，消息含 diff 与未跟踪文件",
   const [call] = piCalls();
   const argv = call!.argv;
   assert.equal(call!.cwd, work);
-  assert.ok(argv.includes("--no-session"));
-  assert.ok(!argv.includes("--session-id"));
+  assert.ok(argv.includes("-p"));
+  const name = sessionIdOf(argv)!;
+  assert.match(name, /^review-\d{8}T\d{6}-\d+$/);
+  assert.ok(argv.includes("--name"));
+  assert.ok(result.stdout.endsWith(`\n\n[pi-bridge] 评审会话：${name}，追问用 pi-bridge send ${name} <消息>\n`));
+  assert.match(run(["list"]).stdout, new RegExp(`^${name}\\tidle\\t.*\\t${work}\\t${name}$`, "m"));
   assert.deepEqual(argv.slice(argv.indexOf("--no-extensions"), argv.indexOf("--no-extensions") + 3), [
     "--no-extensions",
     "--tools",
@@ -40,7 +44,20 @@ test("review：只读运行，不写会话，消息含 diff 与未跟踪文件",
   assert.match(message, /\+changed line/);
   assert.match(message, /未跟踪的新文件：new\.txt ===\nbrand new/);
   assert.match(message, /看并发问题/);
-  assert.equal(run(["list"]).stdout, "（没有会话）\n");
+});
+
+test("review：评审会话可以用 send 追问，在仓库根目录续接同一会话", () => {
+  writeFileSync(join(work, "a.txt"), "changed line\n");
+  mkdirSync(join(work, "sub"));
+  assert.equal(run(["review"], { cwd: join(work, "sub") }).code, 0);
+  const name = sessionIdOf(piCalls()[0]!.argv)!;
+
+  const followUp = run(["send", name, "第 1 条展开说说"], { cwd: home });
+  assert.equal(followUp.code, 0, followUp.stderr);
+  const call = piCalls()[1]!;
+  assert.equal(sessionIdOf(call.argv), name);
+  assert.equal(call.cwd, work);
+  assert.ok(call.argv.includes("--no-extensions"));
 });
 
 test("review --staged 不含未跟踪文件；--base 含分叉点以来的提交", () => {
@@ -69,6 +86,7 @@ test("review：参数互斥、不接受透传参数、没有改动或不在仓�
   assert.match(run(["review"]).stderr, /没有可评审的改动/);
   assert.match(run(["review", "--cwd", home]).stderr, /不在 git 仓库内/);
   assert.deepEqual(piCalls(), []);
+  assert.equal(run(["list"]).stdout, "（没有会话）\n");
 });
 
 interface PatchSeen {
