@@ -145,6 +145,27 @@ test("没有运行时 watch 等待期满后回放上一次运行，退出码随�
   assert.match(done.stdout, /echo:hello\n\[done\]\n$/);
 });
 
+test("两次查找之间开始并结束的运行，watch 立即回放，不等到等待期满", async () => {
+  run(["send", "s1", "hello"]);
+  const started = Date.now();
+  const watched = runAsync(["watch", "s1"]);
+  await sleep(500);
+  writeFileSync(join(home, "logs", "s1.log"), "[start] fast\n[reply]\necho:fast\n[done]\n");
+  const result = await watched;
+  assert.equal(result.code, 0);
+  assert.ok(Date.now() - started < 2500);
+  assert.doesNotMatch(result.stdout, /\[idle\]/);
+  assert.match(result.stdout, /echo:fast\n\[done\]\n$/);
+});
+
+test("上一次运行没有结束标记时，回放后以 [failed] 结束", () => {
+  run(["send", "s1", "hello"]);
+  writeFileSync(join(home, "logs", "s1.log"), "[start] crashed\n[tool] read {}\n");
+  const result = run(["watch", "s1"]);
+  assert.equal(result.code, 1);
+  assert.match(result.stdout, /\[tool\] read \{\}\n\[failed\] 上一次运行没有结束标记，可能异常中断\n$/);
+});
+
 test("watch 可以先于首次 send 启动；等待期满仍没有会话时报错", async () => {
   const watched = runAsync(["watch", "s1"]);
   await sleep(300);
@@ -187,4 +208,8 @@ test("含 id 字段的旧记录以该 id 作为 session-id", () => {
   assert.equal(result.code, 0, result.stderr);
   assert.equal(sessionIdOf(piCalls()[0]!.argv), id);
   assert.match(run(["list"]).stdout, new RegExp(`^old\\tidle\\t.*\\t${id}$`, "m"));
+
+  const removed = run(["rm", "old"]);
+  assert.equal(removed.code, 0);
+  assert.ok(removed.stdout.includes(`这是旧格式会话，同名再 send 会新建会话，旧历史在 ${work} 执行 pi --session-id ${id} 打开`));
 });

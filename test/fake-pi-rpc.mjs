@@ -108,4 +108,9 @@ process.stdin.on("data", (chunk) => {
     }
   }
 });
-process.stdin.on("end", () => setTimeout(() => process.exit(0), Number(process.env.FAKE_PI_RPC_EXIT_DELAY_MS ?? 0)));
+process.stdin.on("end", () => {
+  if (process.env.FAKE_PI_RPC_DIALOG_ON_EOF) {
+    emit({ type: "extension_ui_request", id: "eof-1", method: "select", title: "退出前的提问", options: ["a"] });
+  }
+  setTimeout(() => process.exit(0), Number(process.env.FAKE_PI_RPC_EXIT_DELAY_MS ?? 0));
+});

@@ -6,7 +6,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { afterEach, test } from "node:test";
 import { openDaemon, request } from "../plugins/pi-bridge/src/protocol.ts";
-import { acquireLock } from "../plugins/pi-bridge/src/store.ts";
+import { acquireLock, lockHolder } from "../plugins/pi-bridge/src/store.ts";
 import { piCalls, run, runAsync, setup } from "./helpers.ts";
 
 const DAEMON = fileURLToPath(new URL("../plugins/pi-bridge/src/daemon.ts", import.meta.url));
@@ -218,13 +218,20 @@ test("没有任务时 pi 弹出的对话框被立即取消，并写入常驻进�
   assert.match(readFileSync(join(home, "run", "s1.err"), "utf8"), /\[dialog-cancelled\] select 启动时的提问/);
 });
 
-test("常驻进程先拿锁再读记录：拿锁失败或记录不存在时以一行原因退出", () => {
+test("常驻进程先拿锁再读记录：拿锁失败、记录不存在或已被重建时以一行原因退出", () => {
   ({ home } = setup());
-  const spawnDaemon = (name: string) =>
-    spawnSync("node", [DAEMON, name, JSON.stringify({ isNew: false })], {
+  const spawnDaemon = (name: string, createdAt = "") =>
+    spawnSync("node", [DAEMON, name, JSON.stringify({ isNew: false, createdAt })], {
       env: { ...process.env, PI_BRIDGE_HOME: home },
       encoding: "utf8",
+      timeout: 5000,
     });
+
+  assert.equal(run(["send", "rebuilt", "hello"]).code, 0);
+  const rebuilt = spawnDaemon("rebuilt", "1970-01-01T00:00:00.000Z");
+  assert.equal(rebuilt.status, 1);
+  assert.equal(rebuilt.stderr, "会话 rebuilt 在常驻进程启动期间被删除并重建，请重试\n");
+  assert.ok(!existsSync(join(home, "locks", "rebuilt.lock")));
 
   const missing = spawnDaemon("nosuch");
   assert.equal(missing.status, 1);
@@ -240,6 +247,63 @@ test("常驻进程先拿锁再读记录：拿锁失败或记录不存在时以�
   } finally {
     release();
   }
+});
+
+test("两个 executor 同时自动启动时只有一个成功，另一个报错而不是连上对方的常驻进程", async () => {
+  ({ home } = setup());
+  const results = await Promise.all([
+    runAsync(["send", "s1", "--role", "executor", "--model", "m1", "hello"]),
+    runAsync(["send", "s1", "--role", "executor", "--model", "m2", "hello"]),
+  ]);
+  const codes = results.map((result) => result.code).sort();
+  assert.deepEqual(codes, [0, 1], results.map((result) => result.stderr).join("\n"));
+  const loser = results.find((result) => result.code === 1)!;
+  assert.match(loser.stderr, /会话 s1 正被占用（pid \d+）|只在启动常驻进程时生效/);
+  assert.equal(piCalls().filter((call) => call.argv.includes("rpc")).length, 1);
+});
+
+test("停止过程中 pi 弹出的对话框不影响常驻进程正常退出", async () => {
+  begin({ FAKE_PI_RPC_EXIT_DELAY_MS: "500", FAKE_PI_RPC_DIALOG_ON_EOF: "1" });
+  assert.equal(run(["stop", "s1"]).code, 0);
+  await sleep(200);
+  assert.ok(!existsSync(join(home, "run", "s1.sock")), "常驻进程没有正常走完退出流程");
+  assert.doesNotMatch(readFileSync(join(home, "run", "s1.err"), "utf8"), /Error|ERR_/);
+});
+
+test("stop 只等目标常驻进程释放锁，不受随后接手锁的进程影响", async () => {
+  begin();
+  process.env.PI_BRIDGE_HOME = home;
+  const started = Date.now();
+  const stopping = runAsync(["stop", "s1"]);
+  while (lockHolder("s1") !== undefined && Date.now() - started < 5000) await sleep(5);
+  const release = acquireLock("s1");
+  try {
+    const result = await stopping;
+    assert.equal(result.code, 0, result.stderr);
+    assert.ok(Date.now() - started < 5000);
+  } finally {
+    release();
+  }
+});
+
+test("watch 等待期间常驻进程空闲退出时继续查找，跟随随后自动启动的新常驻进程", async () => {
+  begin({ PI_BRIDGE_IDLE_MS: "1000" });
+  const watched = runAsync(["watch", "s1"]);
+  await sleep(1500);
+  const sent = execAsync("slow");
+  const result = await watched;
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /^\[start\] .*slow[\s\S]*\[done\]\n$/);
+  assert.doesNotMatch(result.stdout, /\[idle\]/);
+  assert.equal((await sent).code, 0);
+});
+
+test("watch 等待期间常驻进程空闲退出且没有新运行时，期满后回放上一次运行", async () => {
+  begin({ PI_BRIDGE_IDLE_MS: "800" });
+  const result = await runAsync(["watch", "s1"]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /^\[idle\] 会话 s1 当前没有任务在运行，以下是上一次运行的记录\n/);
+  assert.match(result.stdout, /echo:hello\n\[done\]\n$/);
 });
 
 test("会话锁被占用时 executor send 报错，不启动常驻进程", () => {

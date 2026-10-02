@@ -10,6 +10,8 @@ import { acquireLock, logPath, readRecord, runPath, sessionIdOf, writeRecord } f
 
 export interface DaemonOptions {
   isNew: boolean;
+  /** 启动方看到的记录的创建时间，用来确认拿锁后读到的是同一个会话 */
+  createdAt: string;
   model?: string;
   thinking?: string;
 }
@@ -38,12 +40,16 @@ function lockOrExit(): () => void {
   }
 }
 
-// 先拿锁再读记录：拿锁之前记录可能被 rm 删掉
+// 先拿锁再读记录：启动方释放锁之后、这里拿到锁之前，记录可能被 rm 删掉或重建
 const release = lockOrExit();
 const found = readRecord(name);
 if (!found) {
   release();
   fatal(`会话不存在：${name}`);
+}
+if (found.createdAt !== options.createdAt) {
+  release();
+  fatal(`会话 ${name} 在常驻进程启动期间被删除并重建，请重试`);
 }
 const record = found;
 const socketFile = runPath(name, "sock");

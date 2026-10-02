@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { appendFileSync, closeSync, existsSync, openSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import type { Socket } from "node:net";
 import { resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -247,16 +247,23 @@ async function startDaemon(name: string, opts: SendOptions): Promise<Socket> {
   if (Buffer.byteLength(socketFile) > SOCKET_PATH_MAX) throw new Error(`会话名过长，socket 路径超过 ${SOCKET_PATH_MAX} 字节：${socketFile}`);
 
   const release = acquireLock(name);
-  let isNew: boolean;
+  let ensured: ReturnType<typeof ensureRecord>;
   try {
-    ({ isNew } = ensureRecord(name, opts.cwd, opts.worktree));
+    ensured = ensureRecord(name, opts.cwd, opts.worktree);
   } finally {
     release();
   }
 
-  const options: DaemonOptions = { isNew, model: opts.model, thinking: opts.thinking };
+  const options: DaemonOptions = {
+    isNew: ensured.isNew,
+    createdAt: ensured.record.createdAt,
+    model: opts.model,
+    thinking: opts.thinking,
+  };
+  // 每次启动先写各自的输出文件，就绪后才改名为会话的输出文件：同时启动的常驻进程不会互相覆盖输出
   const errFile = runPath(name, "err");
-  const fd = openSync(errFile, "w");
+  const startErr = `${errFile}.${process.pid}`;
+  const fd = openSync(startErr, "w");
   const child = spawn(process.execPath, [DAEMON_ENTRY, name, JSON.stringify(options)], {
     detached: true,
     stdio: ["ignore", fd, fd],
@@ -269,19 +276,30 @@ async function startDaemon(name: string, opts: SendOptions): Promise<Socket> {
   const deadline = Date.now() + DAEMON_READY_TIMEOUT_MS;
   while (Date.now() < deadline) {
     const socket = await openDaemon(name);
-    if (socket) return socket;
-    if (exited) throw new Error(`常驻进程启动失败：\n${readFileSync(errFile, "utf8").trim()}`);
+    // 常驻进程先拿锁再监听 socket：持锁者是自己启动的进程，才说明连上的是它，而不是同时启动的另一个
+    if (socket && lockHolder(name) === child.pid) {
+      renameSync(startErr, errFile);
+      return socket;
+    }
+    socket?.destroy();
+    if (exited) {
+      const output = readFileSync(startErr, "utf8").trim();
+      rmSync(startErr, { force: true });
+      throw new Error(`常驻进程启动失败：\n${output}`);
+    }
     await sleep(100);
   }
   child.kill();
-  throw new Error(`常驻进程 ${DAEMON_READY_TIMEOUT_MS / 1000} 秒内未就绪，输出见 ${errFile}`);
+  throw new Error(`常驻进程 ${DAEMON_READY_TIMEOUT_MS / 1000} 秒内未就绪，输出见 ${startErr}`);
 }
 
 /** 请求常驻进程停止，等到它释放会话锁 */
+/** 请求常驻进程停止，等到它释放会话锁；之后被别的命令接手的锁不算在内 */
 async function stopDaemon(name: string): Promise<void> {
+  const holder = lockHolder(name);
   await simpleRequest(name, { type: "stop" });
   const deadline = Date.now() + DAEMON_STOP_TIMEOUT_MS;
-  while (lockHolder(name) !== undefined) {
+  while (holder !== undefined && lockHolder(name) === holder) {
     if (Date.now() > deadline) throw new Error(`常驻进程 ${DAEMON_STOP_TIMEOUT_MS / 1000} 秒内未退出`);
     await sleep(100);
   }
@@ -330,14 +348,28 @@ async function answer(argv: string[]): Promise<number> {
  * print 模式的日志属于当前持锁的运行就跟随日志。等待期覆盖常驻进程的启动超时，
  * 也容许 watch 先于首次 send 创建会话记录
  */
+/**
+ * 等待期内反复查找正在进行的运行：常驻进程能连上就交给它（它在空闲时会继续等新运行开始，
+ * 等待中退出则回到这里继续找）；print 模式的日志属于当前持锁的运行就跟随日志；
+ * 两次查找之间开始并结束的运行，从日志回放。等待期覆盖常驻进程的启动超时，
+ * 也容许 watch 先于首次 send 创建会话记录
+ */
 async function watch(argv: string[]): Promise<number> {
   const [name] = argv;
   assertName(name);
-  const deadline = Date.now() + WATCH_START_WAIT_MS;
+  const startedAt = Date.now();
+  const deadline = startedAt + WATCH_START_WAIT_MS;
+  const log = logPath(name);
   for (;;) {
     const daemon = await openDaemon(name);
-    if (daemon) return watchDaemon(name, daemon, Math.max(0, deadline - Date.now()));
-    if (lockHolder(name) !== undefined && logBelongsToCurrentRun(name, logPath(name))) return followLog(name);
+    if (daemon) {
+      const code = await watchDaemon(name, daemon, Math.max(0, deadline - Date.now()));
+      if (code !== undefined) return code;
+    } else if (lockHolder(name) !== undefined && logBelongsToCurrentRun(name, log)) {
+      return followLog(name);
+    } else if (finishedSince(log, startedAt)) {
+      return followLog(name);
+    }
     if (Date.now() >= deadline) break;
     await sleep(200);
   }
@@ -345,7 +377,15 @@ async function watch(argv: string[]): Promise<number> {
   return printLastRun(name, lastLogLines(name));
 }
 
-async function watchDaemon(name: string, daemon: Socket, waitStartMs: number): Promise<number> {
+/** 日志在 since 之后被重写且已有结束标记：一次在两次查找之间开始并结束的运行 */
+function finishedSince(log: string, since: number): boolean {
+  if (!existsSync(log) || statSync(log).mtimeMs < since) return false;
+  const lines = readFileSync(log, "utf8").split("\n");
+  return lines.includes(DONE) || lines.includes(FAILED);
+}
+
+/** 返回 undefined 表示常驻进程在等待新运行期间退出，由调用方继续查找 */
+async function watchDaemon(name: string, daemon: Socket, waitStartMs: number): Promise<number | undefined> {
   let last: string | undefined;
   for await (const message of request(daemon, { type: "watch", waitStartMs })) {
     if (message.type === "idle") return printLastRun(name, message.lines);
@@ -353,12 +393,9 @@ async function watchDaemon(name: string, daemon: Socket, waitStartMs: number): P
     print(message.line);
     last = message.line;
   }
+  if (last === undefined) return undefined;
   if (last === DONE) return 0;
   if (last === FAILED) return 1;
-  if (last === undefined) {
-    print(`[idle] 会话 ${name} 当前没有任务在运行`);
-    return 0;
-  }
   print(`${FAILED} 与常驻进程的连接中断`);
   return 1;
 }
@@ -371,7 +408,13 @@ function printLastRun(name: string, lines: string[]): number {
   }
   print(`[idle] 会话 ${name} 当前没有任务在运行，以下是上一次运行的记录`);
   for (const line of lines) print(line);
-  return lines.lastIndexOf(FAILED) > lines.lastIndexOf(DONE) ? 1 : 0;
+  const done = lines.lastIndexOf(DONE);
+  const failed = lines.lastIndexOf(FAILED);
+  if (done === -1 && failed === -1) {
+    print(`${FAILED} 上一次运行没有结束标记，可能异常中断`);
+    return 1;
+  }
+  return failed > done ? 1 : 0;
 }
 
 /**
@@ -444,7 +487,11 @@ async function rm(argv: string[]): Promise<number> {
     if (record.worktree) removeWorktree(record.worktree, record.cwd, values.force ?? false);
     removeRecord(name);
     const worktreeNote = record.worktree ? `；worktree 已删除，分支 ${record.worktree.branch} 保留` : "";
-    print(`已删除会话 ${name}，pi 会话文件（${sessionIdOf(record)}）仍保留，同名再 send 会续接${worktreeNote}`);
+    // 旧格式记录的 UUID 只存在于这份记录里，删除后同名 send 会以会话名新建会话
+    const resumeNote = record.id
+      ? `；这是旧格式会话，同名再 send 会新建会话，旧历史在 ${record.cwd} 执行 pi --session-id ${record.id} 打开`
+      : "，同名再 send 会续接";
+    print(`已删除会话 ${name}，pi 会话文件（${sessionIdOf(record)}）仍保留${resumeNote}${worktreeNote}`);
     return 0;
   } finally {
     release();
