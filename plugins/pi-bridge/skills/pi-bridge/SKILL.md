@@ -25,7 +25,7 @@ description: 通过 pi-bridge 命令把任务交给 pi coding agent：以只读�
 | `pi-bridge review [--staged \| --base <分支>] [--cwd <目录>] [--focus <关注点>] [--model <模型>] [--thinking <等级>]` | pi 以只读方式评审当前改动，见“让 pi 评审” |
 | `pi-bridge watch <会话名>` | 跟随该会话正在进行的运行 |
 | `pi-bridge list` | 列出会话：名字、状态（idle / running / daemon）、更新时间、目录、session-id；worktree 会话另附 `分支@base` |
-| `pi-bridge rm <会话名> [--force]` | 删除会话记录与 worktree（分支保留）；有常驻进程时先停止它；pi 的会话文件保留 |
+| `pi-bridge rm <会话名> [--force]` | 删除会话记录与 worktree（分支保留）；有常驻进程时先停止它，正在执行的任务随之中止；pi 的会话文件保留 |
 | `pi-bridge steer <会话名> <消息\|->` | executor 任务中途插话：当前这轮工具执行完后送达，pi 据此调整 |
 | `pi-bridge answer <会话名> <提问 id> <回答\|->` / `--cancel` | 回答 pi 的提问，然后继续等待 |
 | `pi-bridge abort <会话名>` | 中止 executor 当前任务，会话保留 |
