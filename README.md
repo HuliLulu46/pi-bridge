@@ -3,14 +3,13 @@
 Claude Code plugin marketplace，目前提供一个 plugin：`pi-bridge`，让 Claude Code 调用 [pi](https://github.com/earendil-works/pi) coding agent。
 
 - skill `pi-bridge`：指导 Claude 何时、如何把任务交给 pi
-- 命令 `pi-bridge`：按会话名续接 pi 会话；常驻进程模式下支持中途插话、追加任务、中止，以及回答 pi 的提问
-- PreToolUse hook：Claude 同意 pi 的权限确认时，按规则并经 Sonnet 复核，高风险操作弹窗请用户确认
+- 命令 `pi-bridge`：按会话名续接 pi 会话，按角色运行——advisor 只读、跑完即退出；executor 在常驻进程中改代码，支持 pi 中途提问、任务中途插话与中止；另有只读评审 `review`
+- 斜杠命令 `/pi-review`：让 pi 评审当前改动，Claude 逐条核实后汇报
 
 ## 运行要求
 
 - Node.js 22.18 或更高（直接运行 `.ts` 源码，依赖 Node 的类型擦除）
 - 已安装 `pi`，且在 PATH 中
-- 已登录 `claude` 命令行（hook 用 `claude -p` 调用 Sonnet 复核）
 
 ## 安装
 
@@ -39,7 +38,7 @@ claude plugin update pi-bridge@agent-bridge
 plugins/pi-bridge/                plugin 本体（安装时只复制这个目录）
   .claude-plugin/plugin.json
   bin/pi-bridge                   加入 PATH 的命令
-  hooks/hooks.json                权限确认把关 hook
+  commands/pi-review.md           /pi-review 斜杠命令
   skills/pi-bridge/SKILL.md
   src/                            TypeScript 源码
 test/                             测试（pnpm test）

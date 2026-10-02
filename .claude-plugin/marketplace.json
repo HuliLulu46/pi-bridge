@@ -8,7 +8,7 @@
     {
       "name": "pi-bridge",
       "source": "./plugins/pi-bridge",
-      "description": "让 Claude Code 调用 pi coding agent，并对同意 pi 权限确认的操作做把关"
+      "description": "让 Claude Code 调用 pi coding agent：advisor 只读评审与讨论，executor 在常驻进程中改代码"
     }
   ]
 }

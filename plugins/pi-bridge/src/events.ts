@@ -82,7 +82,7 @@ export function parseEvent(line: string): PiEvent | undefined {
   }
 }
 
-/** 跟踪一次运行：把工具调用与重试转成进度行；回复为本次运行中每条正常结束的 assistant 文本（含 steer、follow-up 引出的回复） */
+/** 跟踪一次运行：把工具调用与重试转成进度行；回复为本次运行中每条正常结束的 assistant 文本（含 steer 引出的回复） */
 export function createRunTracker(onProgress: (line: string) => void) {
   let lastAssistant: PiMessage | undefined;
   let settled = false;
