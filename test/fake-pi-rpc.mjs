@@ -1,4 +1,5 @@
 // 模拟 `pi --mode rpc`：从 stdin 读命令，按 prompt 内容决定行为，stdin 关闭即退出
+import { appendFileSync } from "node:fs";
 import { applyFileAction } from "./fake-actions.mjs";
 
 if (process.env.FAKE_PI_RPC_FAIL) {
@@ -12,7 +13,6 @@ const respond = (cmd, extra = {}) => emit({ type: "response", id: cmd.id, comman
 let running = false;
 let aborted = false;
 let steers = [];
-let followUps = [];
 let wakeSlow;
 let answerDialog;
 
@@ -38,7 +38,6 @@ async function run(message) {
   running = true;
   aborted = false;
   steers = [];
-  followUps = [];
   emit({ type: "agent_start" });
   emit({ type: "extension_ui_request", id: "noise", method: "setStatus", statusKey: "demo", statusText: "busy" });
 
@@ -60,12 +59,7 @@ async function run(message) {
       setTimeout(resolve, 1500);
     });
     if (aborted) return settle({ content: [], stopReason: "aborted", errorMessage: "Request was aborted" });
-    emit({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: `echo:slow steer:${steers.join(",")}` }], stopReason: "stop" } });
-    for (const followUp of followUps) {
-      emit({ type: "message_end", message: { role: "user", content: [{ type: "text", text: followUp }] } });
-      emit({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: `follow:${followUp}` }], stopReason: "stop" } });
-    }
-    return end();
+    return finish(`echo:slow steer:${steers.join(",")}`);
   }
   if (message.startsWith("crash:")) {
     applyFileAction(`write:${message.slice("crash:".length)}`);
@@ -73,6 +67,10 @@ async function run(message) {
   }
   applyFileAction(message);
   finish(`echo:${message}`);
+}
+
+if (process.env.FAKE_PI_RPC_STARTUP_DIALOG) {
+  emit({ type: "extension_ui_request", id: "startup-1", method: "select", title: "启动时的提问", options: ["a", "b"] });
 }
 
 let pending = Buffer.alloc(0);
@@ -95,10 +93,6 @@ process.stdin.on("data", (chunk) => {
         steers.push(cmd.message);
         respond(cmd);
         break;
-      case "follow_up":
-        followUps.push(cmd.message);
-        respond(cmd);
-        break;
       case "abort":
         aborted = true;
         wakeSlow?.();
@@ -108,9 +102,10 @@ process.stdin.on("data", (chunk) => {
         respond(cmd, { data: {} });
         break;
       case "extension_ui_response":
+        appendFileSync(`${process.env.FAKE_PI_CALLS}.ui.jsonl`, JSON.stringify(cmd) + "\n");
         answerDialog?.(cmd);
         break;
     }
   }
 });
-process.stdin.on("end", () => process.exit(0));
+process.stdin.on("end", () => setTimeout(() => process.exit(0), Number(process.env.FAKE_PI_RPC_EXIT_DELAY_MS ?? 0)));

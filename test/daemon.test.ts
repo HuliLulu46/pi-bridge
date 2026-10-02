@@ -1,9 +1,14 @@
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 import { afterEach, test } from "node:test";
+import { openDaemon, request } from "../plugins/pi-bridge/src/protocol.ts";
 import { piCalls, run, runAsync, setup } from "./helpers.ts";
+
+const DAEMON = fileURLToPath(new URL("../plugins/pi-bridge/src/daemon.ts", import.meta.url));
 
 let home: string;
 
@@ -63,38 +68,22 @@ test("权限确认默认自动拒绝并在回复末尾报告", () => {
   const result = run(["send", "s1", "confirm"]);
   assert.equal(result.code, 0, result.stderr);
   assert.match(result.stdout, /^declined/);
-  assert.match(result.stdout, /1 次工具调用出错或被拦截/);
+  assert.match(result.stdout, /2 次工具调用出错或被拦截/);
+  assert.match(result.stdout, /- 权限确认被拒绝：Auto mode permission ask rm -rf build/);
 });
 
-test("--allow-confirm 时权限确认转给 Claude，同意须用 --action 附上一致的确认内容", () => {
-  begin({}, ["--allow-confirm"]);
-  const asked = run(["send", "s1", "confirm"]);
-  assert.equal(asked.code, 2, asked.stderr);
-  assert.match(asked.stdout, /yes --action - <<'EOF'\nrm -rf build\nEOF$/m);
-  const id = askId(asked.stdout);
-
-  assert.match(run(["answer", "s1", id, "yes"]).stderr, /必须用 --action/);
-  assert.match(run(["answer", "s1", id, "yes", "--action", "echo hi"]).stderr, /不一致/);
-  const confirmed = run(["answer", "s1", id, "yes", "--action", "-"], { input: "  rm -rf\n build\n" });
-  assert.equal(confirmed.stdout, "confirmed\n", confirmed.stderr);
-});
-
-test("拒绝权限确认不需要附确认内容", () => {
-  begin({}, ["--allow-confirm"]);
-  const asked = run(["send", "s1", "confirm"]);
-  assert.match(run(["answer", "s1", askId(asked.stdout), "no"]).stdout, /^declined/);
-});
-
-test("提问超时后自动取消，pi 继续跑完", async () => {
-  begin({ PI_BRIDGE_ASK_TIMEOUT_MS: "300" });
+test("提问超时后自动取消，pi 继续跑完，watch 等待期满后回放这次运行", async () => {
+  begin({ PI_BRIDGE_ASK_TIMEOUT_MS: "300", PI_BRIDGE_WATCH_WAIT_MS: "300" });
   assert.equal(run(["send", "s1", "ask"]).code, 2);
   await sleep(600);
   const watched = run(["watch", "s1"]);
+  assert.equal(watched.code, 0);
+  assert.match(watched.stdout, /^\[idle\] 会话 s1 当前没有任务在运行，以下是上一次运行的记录\n\[start\] /);
   assert.match(watched.stdout, /\[ask-timeout\] ask-1/);
   assert.match(watched.stdout, /chose:cancelled\n\[done\]\n$/);
 });
 
-test("运行中 send 被拒绝并提示 steer / follow-up，steer 与 follow-up 送达 pi", async () => {
+test("运行中 send 被拒绝并提示 steer，steer 送达 pi", async () => {
   begin();
   const slow = runAsync(["send", "s1", "slow"]);
   await sleep(400);
@@ -103,10 +92,9 @@ test("运行中 send 被拒绝并提示 steer / follow-up，steer 与 follow-up 
   assert.match(busy.stderr, /steer/);
 
   assert.equal(run(["steer", "s1", "left"]).code, 0);
-  assert.equal(run(["follow-up", "s1", "then-test"]).code, 0);
   const result = await slow;
   assert.equal(result.code, 0, result.stderr);
-  assert.equal(result.stdout, "echo:slow steer:left\n\nfollow:then-test\n");
+  assert.equal(result.stdout, "echo:slow steer:left\n");
 });
 
 test("没有任务在运行时 steer 报错", () => {
@@ -135,6 +123,57 @@ test("watch 跟随常驻进程的任务直到 [done]", async () => {
   assert.match(watched.stdout, /^\[start\] /);
   assert.match(watched.stdout, /\[reply\]\necho:slow steer:\n\[done\]\n$/);
   await slow;
+});
+
+test("等待期内开始的新运行被 watch 跟随，不输出上一次运行的记录", async () => {
+  begin({ PI_BRIDGE_WATCH_WAIT_MS: "5000" });
+  assert.equal(run(["send", "s1", "hello"]).code, 0);
+  const watched = runAsync(["watch", "s1"]);
+  await sleep(300);
+  const slow = runAsync(["send", "s1", "slow"]);
+  const result = await watched;
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /^\[start\] .*slow/);
+  assert.doesNotMatch(result.stdout, /echo:hello/);
+  assert.match(result.stdout, /echo:slow steer:\n\[done\]\n$/);
+  await slow;
+});
+
+test("停止中的常驻进程拒绝新请求", async () => {
+  begin({ FAKE_PI_RPC_EXIT_DELAY_MS: "1500" });
+  process.env.PI_BRIDGE_HOME = home;
+  const replies = [];
+  for await (const message of request((await openDaemon("s1"))!, { type: "stop" })) replies.push(message);
+  assert.deepEqual(replies, [{ type: "ok", text: "正在停止" }]);
+
+  const result = run(["send", "s1", "hello"]);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /常驻进程正在停止/);
+  assert.match(run(["steer", "s1", "x"]).stderr, /常驻进程正在停止/);
+});
+
+test("没有任务时 pi 弹出的对话框被立即取消并记入日志", async () => {
+  begin({ FAKE_PI_RPC_STARTUP_DIALOG: "1" });
+  const uiFile = join(home, "calls.jsonl.ui.jsonl");
+  for (let i = 0; i < 20 && !existsSync(uiFile); i++) await sleep(100);
+  assert.deepEqual(JSON.parse(readFileSync(uiFile, "utf8").trim()), {
+    type: "extension_ui_response",
+    id: "startup-1",
+    cancelled: true,
+  });
+  assert.match(readFileSync(join(home, "logs", "s1.log"), "utf8"), /\[dialog-cancelled\] select 启动时的提问/);
+  assert.equal(run(["send", "s1", "hello"]).stdout, "echo:hello\n");
+});
+
+test("常驻进程先拿锁再读记录：记录不存在时以一行原因退出并释放锁", () => {
+  ({ home } = setup());
+  const result = spawnSync("node", [DAEMON, "nosuch", JSON.stringify({ isNew: false, piArgs: [] })], {
+    env: { ...process.env, PI_BRIDGE_HOME: home },
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 1);
+  assert.equal(result.stderr, "会话不存在：nosuch\n");
+  assert.ok(!existsSync(join(home, "locks", "nosuch.lock")));
 });
 
 test("重复 start 报错；常驻进程运行时 rm 被拒绝；stop 后回到 print 模式", () => {

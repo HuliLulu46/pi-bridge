@@ -5,13 +5,12 @@ import { createServer, type Socket } from "node:net";
 import { createLineSplitter, createRunTracker, parseEvent, preview, toolNotice, type PiEvent } from "./events.ts";
 import { trackChanges } from "./git.ts";
 import { PI_ENV, piBin } from "./pi.ts";
-import { confirmText, DONE, FAILED, formatAsk, type Ask, type AskMethod, type ClientRequest, type DaemonMessage } from "./protocol.ts";
+import { DONE, FAILED, formatAsk, type Ask, type AskMethod, type ClientRequest, type DaemonMessage } from "./protocol.ts";
 import { acquireLock, logPath, readRecord, runPath, sessionIdOf, writeRecord } from "./store.ts";
 
 export interface DaemonOptions {
   isNew: boolean;
   model?: string;
-  allowConfirm: boolean;
   piArgs: string[];
 }
 
@@ -24,10 +23,29 @@ const DIALOG_METHODS = new Set<string>(["select", "confirm", "input", "editor"])
 
 const [name, optionsJson] = process.argv.slice(2) as [string, string];
 const options = JSON.parse(optionsJson) as DaemonOptions;
+
+/** 启动失败的原因写到 stderr，由启动方转告给用户 */
+function fatal(message: string): never {
+  process.stderr.write(`${message}\n`);
+  process.exit(1);
+}
+
+function lockOrExit(): () => void {
+  try {
+    return acquireLock(name);
+  } catch (err) {
+    return fatal((err as Error).message);
+  }
+}
+
+// 先拿锁再读记录：拿锁之前记录可能被 rm 删掉
+const release = lockOrExit();
 const found = readRecord(name);
-if (!found) throw new Error(`会话不存在：${name}`);
+if (!found) {
+  release();
+  fatal(`会话不存在：${name}`);
+}
 const record = found;
-const release = acquireLock(name);
 const socketFile = runPath(name, "sock");
 const log = logPath(name);
 
@@ -51,6 +69,8 @@ let busy = false;
 let tracker = createRunTracker(emit);
 let finishChanges = (): string => "";
 let runLines: string[] = [];
+/** 本次运行中被自动拒绝的权限确认，附在回复末尾 */
+let denied: string[] = [];
 const pending = new Map<string, Ask & { timer: NodeJS.Timeout }>();
 /** send/answer 的连接：等到下一个提问或本次运行结束 */
 const waiters = new Set<Socket>();
@@ -100,6 +120,7 @@ function startRun(message: string): void {
   tracker = createRunTracker(emit);
   finishChanges = trackChanges(record.cwd);
   runLines = [];
+  denied = [];
   writeFileSync(log, "");
   for (const [socket, timer] of awaitingStart) {
     clearTimeout(timer);
@@ -130,9 +151,13 @@ function endRun(ok: boolean, text: string, error: string): void {
   scheduleIdleExit();
 }
 
+function runNotice(failedTools: string[]): string {
+  return `${toolNotice([...failedTools, ...denied])}${finishChanges()}`;
+}
+
 function finishRun(): void {
   const result = tracker.result(() => "pi 没有给出回复");
-  const notice = `${toolNotice(result.failedTools)}${finishChanges()}`;
+  const notice = runNotice(result.failedTools);
   endRun(result.ok, result.ok ? `${result.reply}${notice}` : result.reply, `${result.error}${notice}`);
 }
 
@@ -144,9 +169,11 @@ function onDialog(event: PiEvent): void {
     message: event.message as unknown as string | undefined,
     options: event.options,
   };
-  if (ask.method === "confirm" && !options.allowConfirm) {
+  if (ask.method === "confirm") {
     respondDialog(ask.id, { confirmed: false });
-    emit(`[confirm-denied] ${preview(`${ask.title} ${ask.message ?? ""}`)}`);
+    const summary = preview(`${ask.title} ${ask.message ?? ""}`);
+    denied.push(`权限确认被拒绝：${summary}`);
+    emit(`[confirm-denied] ${summary}`);
     return;
   }
   const timer = setTimeout(() => {
@@ -166,7 +193,14 @@ function onPiEvent(event: PiEvent): void {
     return;
   }
   if (event.type === "extension_ui_request") {
-    if (busy && DIALOG_METHODS.has(event.method ?? "")) onDialog(event);
+    if (!DIALOG_METHODS.has(event.method ?? "")) return;
+    if (busy) {
+      onDialog(event);
+    } else {
+      // 启动期与空闲期没有人能回答，不取消的话 pi 会一直等待
+      respondDialog(event.id!, { cancelled: true });
+      appendFileSync(log, `[dialog-cancelled] ${event.method} ${preview(event.title ?? "")}\n`);
+    }
     return;
   }
   if (!busy) return;
@@ -175,63 +209,37 @@ function onPiEvent(event: PiEvent): void {
 }
 
 function answerResponse(ask: Ask, value: string): Record<string, unknown> {
-  switch (ask.method) {
-    case "select": {
-      const options = ask.options ?? [];
-      const index = Number(value);
-      const option = Number.isInteger(index) && index >= 1 ? options[index - 1] : options.find((item) => item === value);
-      if (option === undefined) throw new Error(`没有这个选项：${value}；可选 1-${options.length} 或选项原文`);
-      return { value: option };
-    }
-    case "confirm":
-      if (/^(y|yes|true|是)$/i.test(value)) return { confirmed: true };
-      if (/^(n|no|false|否)$/i.test(value)) return { confirmed: false };
-      throw new Error(`confirm 只接受 yes 或 no：${value}`);
-    default:
-      return { value };
-  }
-}
-
-const normalize = (text: string): string => text.replace(/\s+/g, " ").trim();
-
-function assertActionMatches(ask: Ask, action: string | undefined): void {
-  if (action === undefined) throw new Error("同意权限确认时必须用 --action 附上确认内容原文");
-  if (normalize(action) !== normalize(confirmText(ask))) {
-    throw new Error("--action 与待确认的内容不一致，请原样复制确认内容");
-  }
+  if (ask.method !== "select") return { value };
+  const options = ask.options ?? [];
+  const index = Number(value);
+  const option = Number.isInteger(index) && index >= 1 ? options[index - 1] : options.find((item) => item === value);
+  if (option === undefined) throw new Error(`没有这个选项：${value}；可选 1-${options.length} 或选项原文`);
+  return { value: option };
 }
 
 async function handleRequest(socket: Socket, req: ClientRequest): Promise<void> {
+  if (stopping && req.type !== "watch") throw new Error(`会话 ${name} 的常驻进程正在停止`);
   switch (req.type) {
     case "prompt": {
-      if (busy) {
-        throw new Error(
-          `会话 ${name} 正在运行任务。补充指示用 steer（当前这轮工具执行完后送达），追加任务用 follow-up（整个任务结束后执行）`,
-        );
-      }
+      if (busy) throw new Error(`会话 ${name} 正在运行任务，补充指示用 steer（当前这轮工具执行完后送达）`);
       startRun(req.message);
       waiters.add(socket);
       const response = await piCommand({ type: "prompt", message: req.message });
       if (!response.success) endRun(false, "", `pi 拒绝了这条消息：${response.error}`);
       return;
     }
-    case "steer":
-    case "follow_up": {
+    case "steer": {
       if (!busy) throw new Error(`会话 ${name} 没有运行中的任务，请用 send`);
-      const response = await piCommand({ type: req.type, message: req.message });
-      if (!response.success) throw new Error(response.error ?? `${req.type} 失败`);
-      emit(`[${req.type === "steer" ? "steer" : "follow-up"}] ${preview(req.message)}`);
-      send(socket, {
-        type: "ok",
-        text: req.type === "steer" ? "已送达，当前这轮工具执行完后生效" : "已排队，当前任务结束后执行",
-      });
+      const response = await piCommand({ type: "steer", message: req.message });
+      if (!response.success) throw new Error(response.error ?? "steer 失败");
+      emit(`[steer] ${preview(req.message)}`);
+      send(socket, { type: "ok", text: "已送达，当前这轮工具执行完后生效" });
       return;
     }
     case "answer": {
       const ask = pending.get(req.id);
       if (!ask) throw new Error(`没有待回答的提问：${req.id}`);
       const response = req.cancelled ? { cancelled: true } : answerResponse(ask, req.value ?? "");
-      if (response.confirmed === true) assertActionMatches(ask, req.action);
       clearTimeout(ask.timer);
       pending.delete(req.id);
       emit(`[answered] ${req.id} ${preview(response)}`);
@@ -250,16 +258,17 @@ async function handleRequest(socket: Socket, req: ClientRequest): Promise<void> 
       stop();
       return;
     case "watch": {
-      for (const line of runLines) send(socket, { type: "line", line }, false);
       if (busy) {
+        for (const line of runLines) send(socket, { type: "line", line }, false);
         watchers.add(socket);
         return;
       }
+      // 空闲时先等新运行开始，等不到再交出上一次运行的记录，避免把上一次的结束标记当成本次结果
       awaitingStart.set(
         socket,
         setTimeout(() => {
           awaitingStart.delete(socket);
-          socket.end();
+          send(socket, { type: "idle", lines: runLines });
         }, req.waitStartMs),
       );
       return;
@@ -295,7 +304,10 @@ pi.stdout.on("data", (chunk: Buffer) => {
 });
 
 pi.on("close", (code, signal) => {
-  if (busy) endRun(false, "", `pi 进程退出（${signal ?? `退出码 ${code}`}）${finishChanges()}`);
+  if (busy) {
+    const { failedTools } = tracker.result(() => "");
+    endRun(false, "", `pi 进程退出（${signal ?? `退出码 ${code}`}）${runNotice(failedTools)}`);
+  }
   for (const socket of awaitingStart.keys()) socket.end();
   server.close();
   rmSync(socketFile, { force: true });

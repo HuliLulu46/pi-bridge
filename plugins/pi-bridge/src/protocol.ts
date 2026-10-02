@@ -21,8 +21,8 @@ export interface Ask {
 /** 每个连接只发一条请求；常驻进程回完最后一条消息后关闭连接 */
 export type ClientRequest =
   | { type: "prompt"; message: string }
-  | { type: "steer" | "follow_up"; message: string }
-  | { type: "answer"; id: string; value?: string; cancelled?: boolean; action?: string }
+  | { type: "steer"; message: string }
+  | { type: "answer"; id: string; value?: string; cancelled?: boolean }
   | { type: "abort" }
   | { type: "stop" }
   | { type: "watch"; waitStartMs: number };
@@ -31,27 +31,14 @@ export type DaemonMessage =
   | { type: "ok"; text: string }
   | { type: "error"; error: string }
   | { type: "line"; line: string }
+  /** watch 等不到新运行时，交出上一次运行的全部行 */
+  | { type: "idle"; lines: string[] }
   | { type: "ask"; ask: Ask }
   | { type: "done"; text: string }
   | { type: "failed"; error: string; text: string };
 
-/** 权限确认的内容原文。同意时须原样放进 answer 命令，让 Claude Code auto 模式的分类器审查到实际操作 */
-export function confirmText(ask: Ask): string {
-  return ask.message ?? ask.title;
-}
-
 export function formatAsk(name: string, ask: Ask): string {
   const command = `pi-bridge answer ${name} ${ask.id}`;
-  if (ask.method === "confirm") {
-    return [
-      `[ask] ${ask.id} confirm: ${ask.title}`,
-      `拒绝：${command} no`,
-      "同意：须把确认内容原文放进 --action，供 Claude Code auto 模式审查：",
-      `${command} yes --action - <<'EOF'`,
-      confirmText(ask).trimEnd(),
-      "EOF",
-    ].join("\n");
-  }
   const lines = [`[ask] ${ask.id} ${ask.method}: ${ask.title}`];
   if (ask.message) lines.push(ask.message);
   ask.options?.forEach((option, index) => lines.push(`  ${index + 1}) ${option}`));

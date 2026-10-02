@@ -34,10 +34,9 @@ const USAGE = `用法：
   pi-bridge review [--staged | --base <分支>] [--cwd <目录>] [--focus <关注点>] [--model <模型>] [--thinking <等级>]
 
 常驻进程（任务中途干预、回答 pi 的提问）：
-  pi-bridge start <会话名> [--cwd <目录>] [--model <模型>] [--allow-confirm] [--worktree] [-- <pi 参数>...]
+  pi-bridge start <会话名> [--cwd <目录>] [--model <模型>] [--worktree] [-- <pi 参数>...]
   pi-bridge steer <会话名> <消息|->
-  pi-bridge follow-up <会话名> <消息|->
-  pi-bridge answer <会话名> <提问 id> <回答|-> [--action <确认内容原文|->]
+  pi-bridge answer <会话名> <提问 id> <回答|->
   pi-bridge answer <会话名> <提问 id> --cancel
   pi-bridge abort <会话名>
   pi-bridge stop <会话名>
@@ -48,7 +47,7 @@ const USAGE = `用法：
 
 const EXIT_ASK = 2;
 /** watch 启动后等待任务开始的时长，覆盖 send 与 watch 同时启动时的先后顺序 */
-const WATCH_START_WAIT_MS = 10_000;
+const WATCH_START_WAIT_MS = Number(process.env.PI_BRIDGE_WATCH_WAIT_MS ?? 10_000);
 const WATCH_POLL_MS = 500;
 const DAEMON_READY_TIMEOUT_MS = 60_000;
 const DAEMON_STOP_TIMEOUT_MS = 10_000;
@@ -208,12 +207,7 @@ async function start(argv: string[]): Promise<number> {
   const { values, positionals } = parseArgs({
     args: own,
     allowPositionals: true,
-    options: {
-      cwd: { type: "string" },
-      model: { type: "string" },
-      "allow-confirm": { type: "boolean" },
-      worktree: { type: "boolean" },
-    },
+    options: { cwd: { type: "string" }, model: { type: "string" }, worktree: { type: "boolean" } },
   });
   const [name] = positionals;
   assertName(name);
@@ -234,12 +228,7 @@ async function start(argv: string[]): Promise<number> {
     release();
   }
 
-  const options: DaemonOptions = {
-    isNew: ensured.isNew,
-    model: values.model,
-    allowConfirm: values["allow-confirm"] ?? false,
-    piArgs: passthrough,
-  };
+  const options: DaemonOptions = { isNew: ensured.isNew, model: values.model, piArgs: passthrough };
   const errFile = runPath(name, "err");
   const fd = openSync(errFile, "w");
   const child = spawn(process.execPath, [DAEMON_ENTRY, name, JSON.stringify(options)], {
@@ -256,8 +245,7 @@ async function start(argv: string[]): Promise<number> {
     const socket = await openDaemon(name);
     if (socket) {
       socket.destroy();
-      const confirmNote = options.allowConfirm ? "，权限确认转给 Claude" : "";
-      print(`已启动常驻进程 ${name}（pid ${child.pid}，目录 ${ensured.record.cwd}${confirmNote}）`);
+      print(`已启动常驻进程 ${name}（pid ${child.pid}，目录 ${ensured.record.cwd}）`);
       return 0;
     }
     if (exited) throw new Error(`常驻进程启动失败：\n${readFileSync(errFile, "utf8").trim()}`);
@@ -280,11 +268,11 @@ async function stop(argv: string[]): Promise<number> {
   return 0;
 }
 
-async function queueMessage(type: "steer" | "follow_up", argv: string[]): Promise<number> {
+async function steer(argv: string[]): Promise<number> {
   const [name, raw] = argv;
   assertName(name);
   if (argv.length !== 2) throw new Error("需要恰好一条消息，含空格时请加引号，或用 - 从 stdin 读取");
-  print(await simpleRequest(name, { type, message: await readMessage(raw) }));
+  print(await simpleRequest(name, { type: "steer", message: await readMessage(raw) }));
   return 0;
 }
 
@@ -299,20 +287,14 @@ async function answer(argv: string[]): Promise<number> {
   const { values, positionals } = parseArgs({
     args: argv,
     allowPositionals: true,
-    options: { cancel: { type: "boolean" }, action: { type: "string" } },
+    options: { cancel: { type: "boolean" } },
   });
   const [name, id, raw] = positionals;
   assertName(name);
   if (!id) throw new Error("缺少提问 id");
-  if (raw === "-" && values.action === "-") throw new Error("回答与 --action 不能同时从 stdin 读取");
   const req: ClientRequest = values.cancel
     ? { type: "answer", id, cancelled: true }
-    : {
-        type: "answer",
-        id,
-        value: await readMessage(raw),
-        action: values.action === "-" ? await readStdin() : values.action,
-      };
+    : { type: "answer", id, value: await readMessage(raw) };
   return awaitRun(name, request(await requireDaemon(name), req));
 }
 
@@ -327,6 +309,7 @@ async function watch(argv: string[]): Promise<number> {
 async function watchDaemon(name: string, daemon: Socket): Promise<number> {
   let last: string | undefined;
   for await (const message of request(daemon, { type: "watch", waitStartMs: WATCH_START_WAIT_MS })) {
+    if (message.type === "idle") return printLastRun(name, message.lines);
     if (message.type !== "line") continue;
     print(message.line);
     last = message.line;
@@ -339,6 +322,17 @@ async function watchDaemon(name: string, daemon: Socket): Promise<number> {
   }
   print(`${FAILED} 与常驻进程的连接中断`);
   return 1;
+}
+
+/** 等待期内没有新运行时回放上一次运行，退出码随上一次运行的结果 */
+function printLastRun(name: string, lines: string[]): number {
+  if (lines.length === 0) {
+    print(`[idle] 会话 ${name} 当前没有任务在运行`);
+    return 0;
+  }
+  print(`[idle] 会话 ${name} 当前没有任务在运行，以下是上一次运行的记录`);
+  for (const line of lines) print(line);
+  return lines.lastIndexOf(FAILED) > lines.lastIndexOf(DONE) ? 1 : 0;
 }
 
 /**
@@ -453,8 +447,7 @@ const commands: Record<string, (argv: string[]) => number | Promise<number>> = {
   rm,
   start,
   stop,
-  steer: (argv) => queueMessage("steer", argv),
-  "follow-up": (argv) => queueMessage("follow_up", argv),
+  steer,
   answer,
   abort,
   review,
