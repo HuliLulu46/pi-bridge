@@ -6,9 +6,10 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import type { DaemonOptions } from "./daemon.ts";
+import { currentEngine, runAdvisor } from "./engine.ts";
 import { preview, toolNotice } from "./events.ts";
 import { createWorktree, removeWorktree, rollbackError, type ReviewScope } from "./git.ts";
-import { ADVISOR_ARGS, modelArgs, runPi, type Role } from "./pi.ts";
+import type { Role } from "./pi.ts";
 import { prepareReview } from "./review.ts";
 import { DONE, FAILED, formatAsk, openDaemon, request, type ClientRequest, type DaemonMessage } from "./protocol.ts";
 import {
@@ -160,6 +161,9 @@ async function send(argv: string[]): Promise<number> {
   if (positionals.length !== 2) throw new Error("需要恰好一条消息，含空格时请加引号，或用 - 从 stdin 读取");
   const role = values.role as Role;
   if (role !== "advisor" && role !== "executor") throw new Error(`--role 只能是 advisor 或 executor：${role}`);
+  if (role === "executor" && currentEngine() === "qoder") {
+    throw new Error("PI_BRIDGE_ENGINE=qoder 第一版只支持 advisor（含 review）；要用 executor 请去掉该环境变量走 pi");
+  }
   const message = await readMessage(raw);
   const opts: SendOptions = {
     cwd: values.cwd,
@@ -179,28 +183,36 @@ async function sendAdvisor(name: string, message: string, opts: SendOptions): Pr
   const release = acquireLock(name);
   try {
     const { record, isNew } = ensureRecord(name, opts.cwd, opts.worktree);
-    return await runPrint(record, isNew, message, [...ADVISOR_ARGS, ...modelArgs(opts.model, opts.thinking)]);
+    return await runPrint(record, isNew, message, { model: opts.model, thinking: opts.thinking });
   } finally {
     release();
   }
 }
 
-/** 以 print 模式运行一轮；调用方须持有会话锁。footer 附在回复与错误信息末尾 */
+interface PrintOptions {
+  model?: string;
+  thinking?: string;
+}
+
+/** 以只读顾问身份运行一轮（引擎由 PI_BRIDGE_ENGINE 决定）；调用方须持有会话锁。footer 附在回复与错误信息末尾 */
 async function runPrint(
   record: SessionRecord,
   isNew: boolean,
   message: string,
-  piArgs: string[],
+  opts: PrintOptions,
   footer = "",
 ): Promise<number> {
   const log = logPath(record.name);
   writeFileSync(log, `[start] ${new Date().toISOString()} ${preview(message)}\n`);
   const progress = (line: string): void => appendFileSync(log, `${line}\n`);
-  const result = await runPi({
+  const result = await runAdvisor({
+    sessionName: record.name,
     sessionId: sessionIdOf(record),
     cwd: record.cwd,
     message,
-    piArgs: [...(isNew ? ["--name", record.name] : []), ...piArgs],
+    isNew,
+    model: opts.model,
+    thinking: opts.thinking,
     onProgress: progress,
   });
   writeRecord({ ...record, updatedAt: new Date().toISOString() });
@@ -525,8 +537,7 @@ async function review(argv: string[]): Promise<number> {
       const record: SessionRecord = { name, cwd: prepared.root, createdAt: now, updatedAt: now };
       writeRecord(record);
       const footer = `\n\n[pi-bridge] 评审会话：${name}，追问用 pi-bridge send ${name} <消息>`;
-      const piArgs = [...ADVISOR_ARGS, ...modelArgs(values.model, values.thinking)];
-      return await runPrint(record, true, prepared.message, piArgs, footer);
+      return await runPrint(record, true, prepared.message, { model: values.model, thinking: values.thinking }, footer);
     } finally {
       release();
     }

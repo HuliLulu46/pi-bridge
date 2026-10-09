@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const CLI = fileURLToPath(new URL("../plugins/pi-bridge/src/cli.ts", import.meta.url));
 const FAKE_PI = fileURLToPath(new URL("./fake-pi.mjs", import.meta.url));
+const FAKE_QODER = fileURLToPath(new URL("./fake-qoder.mjs", import.meta.url));
 
 export interface Result {
   code: number | null;
@@ -52,9 +53,11 @@ function env(): NodeJS.ProcessEnv {
     ...process.env,
     ...GIT_ENV,
     PI_BIN: FAKE_PI,
+    QODER_BIN: FAKE_QODER,
     PI_BRIDGE_HOME: home,
     PI_BRIDGE_WATCH_WAIT_MS: "3000",
     FAKE_PI_CALLS: join(home, "calls.jsonl"),
+    FAKE_QODER_CALLS: join(home, "qoder-calls.jsonl"),
     ...extraEnv,
   };
 }
@@ -84,4 +87,23 @@ export function piCalls(): Array<{ argv: string[]; cwd: string; subagent?: strin
 
 export function sessionIdOf(argv: string[]): string | undefined {
   return argv[argv.indexOf("--session-id") + 1];
+}
+
+export function qoderCalls(): Array<{ argv: string[]; cwd: string }> {
+  const file = join(home, "qoder-calls.jsonl");
+  if (!existsSync(file)) return [];
+  return readFileSync(file, "utf8")
+    .trim()
+    .split("\n")
+    .filter((line) => line !== "")
+    .map((line) => JSON.parse(line));
+}
+
+/** qoderclicn 首次用 --session-id 建会话、续接用 --resume，取其中出现的那个 */
+export function qoderSessionIdOf(argv: string[]): string | undefined {
+  for (const flag of ["--session-id", "--resume"]) {
+    const index = argv.indexOf(flag);
+    if (index !== -1) return argv[index + 1];
+  }
+  return undefined;
 }

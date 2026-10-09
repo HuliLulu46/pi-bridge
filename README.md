@@ -80,6 +80,22 @@ Claude 能根据你的意图回答的直接回答，拿不准的再问你；`pi-
 - Node.js 22.18 或更高（直接运行 `.ts` 源码，依赖 Node 的类型擦除）
 - 已安装 `pi`，且在 PATH 中
 
+## 实验：改用 qoderclicn 作为被调用方
+
+设置 `PI_BRIDGE_ENGINE=qoder`，advisor 与 review 就不再调用 pi，而是调用 [Qoder CLI（qoderclicn）](https://docs.qoder.cn/cli)——即把 qoderclicn 当成 pi 那样的“第二个大脑”。缺省仍是 `pi`，不设该变量时行为完全不变。
+
+```bash
+PI_BRIDGE_ENGINE=qoder pi-bridge send design-review "只读评审这份方案，指出风险最高的三处"
+PI_BRIDGE_ENGINE=qoder pi-bridge review --base main
+```
+
+实现方式：`pi-bridge` 会话名被确定性地映射成一个 UUID（qoderclicn 的 `--session-id` 要求合法 UUID），首次用 `--session-id` 建会话、之后用 `--resume` 续接；每轮以 `-p --output-format stream-json` 运行，解析 `assistant`/`user`/`result` 事件得到回复与工具进度。只读隔离用 `--tools Read Grep Glob` + `--strict-mcp-config`，并加 `--permission-mode bypass_permissions`——工具已被限制为只读三件套、没有写入或执行能力可绕过，放行权限确认只是让读操作（含工作目录外的绝对路径）免打断。可用 `QODER_BIN` 指定 qoderclicn 的路径。
+
+第一版的边界：
+
+- **只支持 advisor 与 review**。`--role executor` 在 qoder 引擎下会直接报错；executor 仍由 pi 承接。
+- **没有“中途提问”**。pi 的 executor 能卡住回头问，靠的是它专有的对话协议；qoderclicn 侧要用 SDK 的进程内 MCP 工具复刻，留待后续版本。因此 qoder advisor 的疑问只会写在最终回复里，由主控在下一轮回答（与 pi 的 advisor 一致）。
+
 ## 安装
 
 ```bash
