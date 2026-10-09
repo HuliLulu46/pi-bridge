@@ -79,15 +79,18 @@ Claude 能根据你的意图回答的直接回答，拿不准的再问你；`pi-
 
 - Node.js 22.18 或更高（直接运行 `.ts` 源码，依赖 Node 的类型擦除）
 - 已安装 `pi`，且在 PATH 中
+- 用 `--engine qoder` 时，另需已安装 `qoderclicn`（或用 `QODER_BIN` 指定其路径）
 
-## 实验：改用 qoderclicn 作为被调用方
+## 被调用方引擎：pi 或 qoderclicn（两个都可用）
 
-设置 `PI_BRIDGE_ENGINE=qoder`，advisor 与 review 就不再调用 pi，而是调用 [Qoder CLI（qoderclicn）](https://docs.qoder.cn/cli)——即把 qoderclicn 当成 pi 那样的“第二个大脑”。缺省仍是 `pi`，不设该变量时行为完全不变。
+被调用方（“第二个大脑”）既可以是 pi，也可以是 [Qoder CLI（qoderclicn）](https://docs.qoder.cn/cli)，用 `--engine` 选择，缺省 `pi`：
 
 ```bash
-PI_BRIDGE_ENGINE=qoder pi-bridge send design-review "只读评审这份方案，指出风险最高的三处"
-PI_BRIDGE_ENGINE=qoder pi-bridge review --base main
+pi-bridge send design-review --engine qoder "只读评审这份方案，指出风险最高的三处"
+pi-bridge review --engine qoder --base main
 ```
+
+也可用环境变量 `PI_BRIDGE_ENGINE=pi|qoder` 设**新建会话**的缺省（`--engine` 优先于它）。引擎在会话首次创建时绑定，续接以绑定为准；对已存在的会话传入不同的 `--engine` 会报错，要换引擎就换一个会话名。qoder 引擎第一版**只支持 advisor 与 review**（只读顾问），executor 仍由 pi 承接。
 
 实现方式：`pi-bridge` 会话名被确定性地映射成一个 UUID（qoderclicn 的 `--session-id` 要求合法 UUID），首次用 `--session-id` 建会话、之后用 `--resume` 续接；每轮以 `-p --output-format stream-json` 运行，解析 `assistant`/`user`/`result` 事件得到回复与工具进度。只读隔离用 `--tools Read Grep Glob` + `--strict-mcp-config`，并加 `--permission-mode bypass_permissions`——工具已被限制为只读三件套、没有写入或执行能力可绕过，放行权限确认只是让读操作（含工作目录外的绝对路径）免打断。可用 `QODER_BIN` 指定 qoderclicn 的路径。
 

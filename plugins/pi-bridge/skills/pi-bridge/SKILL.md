@@ -1,6 +1,6 @@
 ---
 name: pi-bridge
-description: 通过 pi-bridge 命令把任务交给 pi coding agent：以只读顾问身份做方案评审、方向判断、代码评审，或以执行者身份改代码（常驻进程，支持 pi 中途提问、任务中途插话或中止），按会话名多轮续接，可在 worktree 中隔离运行。当用户要求“让 pi 做 / 交给 pi / 问问 pi / 让 pi 评审 / 用 pi agent”，需要把任务委托给 pi，或跨多个文件的改动在提交前需要第二意见时使用。
+description: 通过 pi-bridge 命令把任务交给 pi 或 qoderclicn coding agent（被调用方引擎用 --engine 选择，缺省 pi）：以只读顾问身份做方案评审、方向判断、代码评审，或以执行者身份改代码（常驻进程，支持 pi 中途提问、任务中途插话或中止），按会话名多轮续接，可在 worktree 中隔离运行。当用户要求“让 pi 做 / 交给 pi / 问问 pi / 让 pi 评审 / 用 pi agent / 用 qoder 评审”，需要把任务委托给 pi 或 qoderclicn，或跨多个文件的改动在提交前需要第二意见时使用。
 ---
 
 # pi-bridge
@@ -21,8 +21,8 @@ description: 通过 pi-bridge 命令把任务交给 pi coding agent：以只读�
 
 | 命令 | 作用 |
 |---|---|
-| `pi-bridge send <会话名> [--role advisor\|executor] [--cwd <目录>] [--model <模型>] [--thinking <等级>] [--worktree] <消息\|->` | 发送一条消息并等待回复；会话不存在时创建 |
-| `pi-bridge review [--staged \| --base <分支>] [--cwd <目录>] [--focus <关注点>] [--model <模型>] [--thinking <等级>]` | pi 以只读方式评审当前改动，见“让 pi 评审” |
+| `pi-bridge send <会话名> [--role advisor\|executor] [--engine pi\|qoder] [--cwd <目录>] [--model <模型>] [--thinking <等级>] [--worktree] <消息\|->` | 发送一条消息并等待回复；会话不存在时创建 |
+| `pi-bridge review [--engine pi\|qoder] [--staged \| --base <分支>] [--cwd <目录>] [--focus <关注点>] [--model <模型>] [--thinking <等级>]` | 以只读方式评审当前改动，见“让 pi 评审” |
 | `pi-bridge watch <会话名>` | 跟随该会话正在进行的运行 |
 | `pi-bridge list` | 列出会话：名字、状态（idle / running / daemon）、更新时间、目录、session-id；worktree 会话另附 `分支@base` |
 | `pi-bridge rm <会话名> [--force]` | 删除会话记录与 worktree（分支保留）；有常驻进程时先停止它，正在执行的任务随之中止；pi 的会话文件保留 |
@@ -30,6 +30,16 @@ description: 通过 pi-bridge 命令把任务交给 pi coding agent：以只读�
 | `pi-bridge answer <会话名> <提问 id> <回答\|->` / `--cancel` | 回答 pi 的提问，然后继续等待 |
 | `pi-bridge abort <会话名>` | 中止 executor 当前任务，会话保留 |
 | `pi-bridge stop <会话名>` | 停止常驻进程，正在执行的任务随之中止 |
+
+## 被调用方引擎：pi 或 qoder（两个都可用）
+
+“第二个大脑”既可以是 pi，也可以是 qoderclicn，两者对主控的用法完全一致——同样在后台跑、读回复、逐条核实。用 `--engine` 选择：
+
+- `--engine pi`（缺省）走 pi；`--engine qoder` 走 qoderclicn。也可用环境变量 `PI_BRIDGE_ENGINE=pi|qoder` 设**新建会话**的缺省，`--engine` 优先于它。
+- 引擎在会话**首次创建时绑定**，之后续接以绑定为准；对已存在的会话显式传入不同的 `--engine` 会报错。要换引擎就换一个会话名。
+- `send` 与 `review` 都支持 `--engine`。
+- **qoder 引擎第一版只支持 advisor 与 review（只读顾问）**；executor（改代码、中途提问）仍由 pi 承接。对 qoder 会话请求 `--role executor` 会报错。因此需要“交给它改代码”时用 pi，需要“只读第二意见”时 pi、qoder 皆可。
+- qoder 的 advisor 同样只读：工具被限制为 Read/Grep/Glob，不加载外部 MCP，读操作免权限打断。它的疑问只写在最终回复里（不像 pi 的 executor 能中途提问），由主控在下一轮回答。
 
 ## 调用方式
 

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { beforeEach, test } from "node:test";
-import { initRepo, qoderCalls, qoderSessionIdOf, run, setup } from "./helpers.ts";
+import { initRepo, piCalls, qoderCalls, qoderSessionIdOf, run, setEnv, setup } from "./helpers.ts";
 import { createQoderRunTracker, nameToUuid } from "../plugins/pi-bridge/src/qoder.ts";
 
 let home: string;
@@ -127,4 +127,68 @@ test("事件解析：没有 result 事件时用 fallback 错误", () => {
   assert.equal(result.ok, false);
   assert.equal(result.error, "process crashed");
   assert.equal(result.reply, "half");
+});
+
+// ---------- --engine 选择与会话级绑定 ----------
+
+test("--engine qoder 建会话即用 qoderclicn，并把引擎写进记录", () => {
+  const { home } = setup();
+  const result = run(["send", "s1", "--engine", "qoder", "hello"]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(qoderCalls().length, 1);
+  assert.equal(piCalls().length, 0);
+  const record = JSON.parse(readFileSync(join(home, "sessions", "s1.json"), "utf8")) as { engine?: string };
+  assert.equal(record.engine, "qoder");
+});
+
+test("--engine 优先于 PI_BRIDGE_ENGINE：env=qoder 但 --engine pi 时走 pi", () => {
+  setup({ PI_BRIDGE_ENGINE: "qoder" });
+  const result = run(["send", "s1", "--engine", "pi", "hello"]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(piCalls().length, 1);
+  assert.equal(qoderCalls().length, 0);
+});
+
+test("会话绑定引擎后续接忽略 env：pi 会话在 env=qoder 下仍走 pi", () => {
+  setup();
+  assert.equal(run(["send", "s1", "hello"]).code, 0);
+  assert.equal(piCalls().length, 1);
+  setEnv({ PI_BRIDGE_ENGINE: "qoder" });
+  assert.equal(run(["send", "s1", "again"]).code, 0);
+  assert.equal(piCalls().length, 2);
+  assert.equal(qoderCalls().length, 0);
+});
+
+test("显式 --engine 与会话已绑定引擎不一致时报错，不调用另一个引擎", () => {
+  setup();
+  assert.equal(run(["send", "s1", "hello"]).code, 0);
+  const result = run(["send", "s1", "--engine", "qoder", "again"]);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /绑定的引擎是 pi/);
+  assert.equal(qoderCalls().length, 0);
+});
+
+test("--engine 只接受 pi 或 qoder", () => {
+  setup();
+  const result = run(["send", "s1", "--engine", "boss", "hello"]);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /只能是 pi 或 qoder/);
+});
+
+test("--engine qoder 下 executor 被拒绝（第一版 executor 仍归 pi）", () => {
+  setup();
+  const result = run(["send", "s1", "--role", "executor", "--engine", "qoder", "hello"]);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /只支持 advisor/);
+  assert.equal(qoderCalls().length, 0);
+});
+
+test("review --engine qoder 走 qoderclicn，不走 pi", () => {
+  const { work } = setup();
+  initRepo(work);
+  writeFileSync(join(work, "a.txt"), "changed\n");
+  const result = run(["review", "--engine", "qoder"]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(qoderCalls().length, 1);
+  assert.equal(piCalls().length, 0);
 });

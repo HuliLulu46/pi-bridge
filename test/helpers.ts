@@ -26,6 +26,11 @@ export function setup(env: NodeJS.ProcessEnv = {}): { home: string; work: string
   return { home, work };
 }
 
+/** 只替换注入的环境变量、保留当前 home 与 work：用于测试同一会话在不同 env 下的续接 */
+export function setEnv(env: NodeJS.ProcessEnv): void {
+  extraEnv = env;
+}
+
 /** 隔离用户的全局 git 配置，并提供提交所需的身份 */
 export const GIT_ENV = {
   GIT_CONFIG_GLOBAL: "/dev/null",

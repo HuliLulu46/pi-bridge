@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { linkSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import type { Engine } from "./engine.ts";
 
 export interface WorktreeInfo {
   /** 创建 worktree 的仓库根目录 */
@@ -16,6 +17,8 @@ export interface SessionRecord {
   /** 只出现在旧记录中；新记录以会话名作为 pi 的 session-id */
   id?: string;
   cwd: string;
+  /** 由谁承接这个会话；缺省（含没有该字段的旧记录）视为 pi，建会话时绑定，之后不变 */
+  engine?: Engine;
   createdAt: string;
   updatedAt: string;
   worktree?: WorktreeInfo;

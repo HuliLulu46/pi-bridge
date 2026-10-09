@@ -6,7 +6,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import type { DaemonOptions } from "./daemon.ts";
-import { currentEngine, runAdvisor } from "./engine.ts";
+import { resolveEngine, runAdvisor, type Engine } from "./engine.ts";
 import { preview, toolNotice } from "./events.ts";
 import { createWorktree, removeWorktree, rollbackError, type ReviewScope } from "./git.ts";
 import type { Role } from "./pi.ts";
@@ -28,11 +28,11 @@ import {
 } from "./store.ts";
 
 const USAGE = `用法：
-  pi-bridge send <会话名> [--role advisor|executor] [--cwd <目录>] [--model <模型>] [--thinking <等级>] [--worktree] <消息|->
+  pi-bridge send <会话名> [--role advisor|executor] [--engine pi|qoder] [--cwd <目录>] [--model <模型>] [--thinking <等级>] [--worktree] <消息|->
   pi-bridge watch <会话名>
   pi-bridge list
   pi-bridge rm <会话名> [--force]
-  pi-bridge review [--staged | --base <分支>] [--cwd <目录>] [--focus <关注点>] [--model <模型>] [--thinking <等级>]
+  pi-bridge review [--engine pi|qoder] [--staged | --base <分支>] [--cwd <目录>] [--focus <关注点>] [--model <模型>] [--thinking <等级>]
 
 常驻进程（executor 会话的任务中途干预、回答 pi 的提问）：
   pi-bridge steer <会话名> <消息|->
@@ -44,7 +44,9 @@ const USAGE = `用法：
 消息写 - 时从 stdin 读取。首次 send 创建会话并绑定 cwd（默认当前目录），之后固定在该目录运行。
 --role 缺省为 advisor：只读，跑完即退出。executor 在常驻进程中运行，没有常驻进程时自动启动，空闲 30 分钟自动退出；
 pi 提问时 send 打印提问并以退出码 2 退出，用 answer 回答后继续等待。会话有常驻进程时，先 stop 才能以 advisor 发送。
-创建会话时加 --worktree，会在 <仓库>/.pi-bridge/worktrees/<会话名> 建立分支为 pi/<会话名> 的 worktree 并在其中运行。`;
+创建会话时加 --worktree，会在 <仓库>/.pi-bridge/worktrees/<会话名> 建立分支为 pi/<会话名> 的 worktree 并在其中运行。
+--engine 选择被调用方：pi（缺省）或 qoder（qoderclicn）。只在建会话时生效并绑定到该会话，续接时以绑定为准；
+也可用环境变量 PI_BRIDGE_ENGINE 设新建缺省。qoder 引擎第一版只支持 advisor 与 review，executor 仍走 pi。`;
 
 const EXIT_ASK = 2;
 /** watch 启动后等待任务开始的时长，覆盖 send 与 watch 同时启动时的先后顺序，以及常驻进程的启动超时 */
@@ -78,15 +80,24 @@ function ensureRecord(
   name: string,
   cwdOption: string | undefined,
   worktree: boolean,
+  engine: Engine,
+  engineExplicit: boolean,
 ): { record: SessionRecord; isNew: boolean } {
   const existing = readRecord(name);
   if (existing && worktree) throw new Error(`会话 ${name} 已存在，worktree 只能在创建会话时指定`);
   const cwd = resolve(cwdOption ?? existing?.cwd ?? process.cwd());
   if (existing && existing.cwd !== cwd) throw new Error(`会话 ${name} 绑定在 ${existing.cwd}，不能改到 ${cwd}`);
-  if (existing) return { record: existing, isNew: false };
+  if (existing) {
+    // 会话已绑定引擎，续接以记录为准；只有显式 --engine 与绑定不一致才报错，env 仅在新建时生效
+    const bound = existing.engine ?? "pi";
+    if (engineExplicit && engine !== bound) {
+      throw new Error(`会话 ${name} 绑定的引擎是 ${bound}，不能改用 ${engine}`);
+    }
+    return { record: existing, isNew: false };
+  }
   if (!existsSync(cwd)) throw new Error(`目录不存在：${cwd}`);
   const now = new Date().toISOString();
-  const base = { name, createdAt: now, updatedAt: now };
+  const base = { name, engine, createdAt: now, updatedAt: now };
   if (!worktree) {
     const record = { ...base, cwd };
     writeRecord(record);
@@ -141,6 +152,8 @@ interface SendOptions {
   model?: string;
   thinking?: string;
   worktree: boolean;
+  engine: Engine;
+  engineExplicit: boolean;
 }
 
 async function send(argv: string[]): Promise<number> {
@@ -150,6 +163,7 @@ async function send(argv: string[]): Promise<number> {
     allowPositionals: true,
     options: {
       role: { type: "string", default: "advisor" },
+      engine: { type: "string" },
       cwd: { type: "string" },
       model: { type: "string" },
       thinking: { type: "string" },
@@ -161,8 +175,10 @@ async function send(argv: string[]): Promise<number> {
   if (positionals.length !== 2) throw new Error("需要恰好一条消息，含空格时请加引号，或用 - 从 stdin 读取");
   const role = values.role as Role;
   if (role !== "advisor" && role !== "executor") throw new Error(`--role 只能是 advisor 或 executor：${role}`);
-  if (role === "executor" && currentEngine() === "qoder") {
-    throw new Error("PI_BRIDGE_ENGINE=qoder 第一版只支持 advisor（含 review）；要用 executor 请去掉该环境变量走 pi");
+  const engine = resolveEngine(values.engine);
+  // executor 只支持 pi：会话已绑定则以绑定为准，否则以本次解析出的引擎为准
+  if (role === "executor" && (readRecord(name)?.engine ?? engine) === "qoder") {
+    throw new Error("qoder 引擎第一版只支持 advisor（含 review）；executor 请用 pi（--engine pi，且不要设 PI_BRIDGE_ENGINE=qoder）");
   }
   const message = await readMessage(raw);
   const opts: SendOptions = {
@@ -170,6 +186,8 @@ async function send(argv: string[]): Promise<number> {
     model: values.model,
     thinking: values.thinking,
     worktree: values.worktree ?? false,
+    engine,
+    engineExplicit: values.engine !== undefined,
   };
   return role === "advisor" ? sendAdvisor(name, message, opts) : sendExecutor(name, message, opts);
 }
@@ -182,7 +200,7 @@ async function sendAdvisor(name: string, message: string, opts: SendOptions): Pr
   }
   const release = acquireLock(name);
   try {
-    const { record, isNew } = ensureRecord(name, opts.cwd, opts.worktree);
+    const { record, isNew } = ensureRecord(name, opts.cwd, opts.worktree, opts.engine, opts.engineExplicit);
     return await runPrint(record, isNew, message, { model: opts.model, thinking: opts.thinking });
   } finally {
     release();
@@ -194,7 +212,7 @@ interface PrintOptions {
   thinking?: string;
 }
 
-/** 以只读顾问身份运行一轮（引擎由 PI_BRIDGE_ENGINE 决定）；调用方须持有会话锁。footer 附在回复与错误信息末尾 */
+/** 以只读顾问身份运行一轮（引擎取会话绑定的 record.engine）；调用方须持有会话锁。footer 附在回复与错误信息末尾 */
 async function runPrint(
   record: SessionRecord,
   isNew: boolean,
@@ -206,6 +224,7 @@ async function runPrint(
   writeFileSync(log, `[start] ${new Date().toISOString()} ${preview(message)}\n`);
   const progress = (line: string): void => appendFileSync(log, `${line}\n`);
   const result = await runAdvisor({
+    engine: record.engine ?? "pi",
     sessionName: record.name,
     sessionId: sessionIdOf(record),
     cwd: record.cwd,
@@ -261,7 +280,7 @@ async function startDaemon(name: string, opts: SendOptions): Promise<Socket> {
   const release = acquireLock(name);
   let ensured: ReturnType<typeof ensureRecord>;
   try {
-    ensured = ensureRecord(name, opts.cwd, opts.worktree);
+    ensured = ensureRecord(name, opts.cwd, opts.worktree, opts.engine, opts.engineExplicit);
   } finally {
     release();
   }
@@ -520,6 +539,7 @@ async function review(argv: string[]): Promise<number> {
       focus: { type: "string" },
       model: { type: "string" },
       thinking: { type: "string" },
+      engine: { type: "string" },
     },
   });
   if (values.staged && values.base) throw new Error("--staged 与 --base 不能同时使用");
@@ -534,7 +554,13 @@ async function review(argv: string[]): Promise<number> {
     const release = acquireLock(name);
     try {
       const now = new Date().toISOString();
-      const record: SessionRecord = { name, cwd: prepared.root, createdAt: now, updatedAt: now };
+      const record: SessionRecord = {
+        name,
+        cwd: prepared.root,
+        engine: resolveEngine(values.engine),
+        createdAt: now,
+        updatedAt: now,
+      };
       writeRecord(record);
       const footer = `\n\n[pi-bridge] 评审会话：${name}，追问用 pi-bridge send ${name} <消息>`;
       return await runPrint(record, true, prepared.message, { model: values.model, thinking: values.thinking }, footer);
