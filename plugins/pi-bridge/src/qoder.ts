@@ -9,14 +9,25 @@ export interface QoderRunOptions {
   message: string;
   /** 首次运行用 --session-id 建会话，之后用 --resume 续接 */
   isNew: boolean;
+  /** advisor 只读；editor 可写文件（Edit/Write），不给 Bash */
+  role: PrintRole;
   model?: string;
   thinking?: string;
   systemPrompt?: string;
   onProgress: (line: string) => void;
 }
 
+/** print 模式（一次性运行）下的角色：advisor 只读，editor 可编辑文件 */
+export type PrintRole = "advisor" | "editor";
+
 /** advisor 只读工具集：qoderclicn 的工具名是 PascalCase，没有 find/ls，用 Glob 覆盖查找 */
 const ADVISOR_TOOLS = ["Read", "Grep", "Glob"];
+/** editor 工具集：只读三件套 + 文件编辑。不含 Bash——权限被整体放行，执行命令风险太大 */
+const EDITOR_TOOLS = [...ADVISOR_TOOLS, "Edit", "Write"];
+
+function toolsOf(role: PrintRole): string[] {
+  return role === "editor" ? EDITOR_TOOLS : ADVISOR_TOOLS;
+}
 
 export function qoderBin(): string {
   return process.env.QODER_BIN ?? "qoderclicn";
@@ -114,9 +125,10 @@ export function createQoderRunTracker(onProgress: (line: string) => void) {
   };
 }
 
-/** 以只读顾问身份跑一轮 qoderclicn；进程结束（result 事件后自行退出）即完成 */
+/** 以 print 模式跑一轮 qoderclicn（advisor 只读 / editor 可写文件）；进程结束（result 事件后自行退出）即完成 */
 export function runQoder(opts: QoderRunOptions): Promise<RunResult> {
   const sessionArgs = opts.isNew ? ["--session-id", opts.sessionId] : ["--resume", opts.sessionId];
+  const editor = opts.role === "editor";
   const args = [
     "-p",
     "--output-format",
@@ -126,12 +138,15 @@ export function runQoder(opts: QoderRunOptions): Promise<RunResult> {
     ...(opts.thinking ? ["--thinking", opts.thinking] : []),
     ...(opts.systemPrompt ? ["--append-system-prompt", opts.systemPrompt] : []),
     // advisor 只读隔离：工具已被限制为只读三件套，没有写入/执行能力可绕过，因此放行权限确认
-    // 能让读操作（含工作目录外的绝对路径）像 pi 的顾问一样免打断；同时不加载任何外部 MCP server。
+    // 能让读操作（含工作目录外的绝对路径）像 pi 的顾问一样免打断。
+    // editor 用 accept_edits：工作目录内的 Edit/Write 自动放行、目录外仍被拒；没有 Bash，
+    // 无头模式下需要确认的操作会被自动拒绝并作为 tool-error 汇报，不会卡住。
+    // 两种角色都不加载任何外部 MCP server。
     "--permission-mode",
-    "bypass_permissions",
+    editor ? "accept_edits" : "bypass_permissions",
     "--strict-mcp-config",
     "--tools",
-    ...ADVISOR_TOOLS,
+    ...toolsOf(opts.role),
     "--",
     opts.message,
   ];

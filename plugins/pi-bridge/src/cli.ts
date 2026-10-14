@@ -10,6 +10,7 @@ import { resolveEngine, runAdvisor, type Engine } from "./engine.ts";
 import { preview, toolNotice } from "./events.ts";
 import { createWorktree, removeWorktree, rollbackError, type ReviewScope } from "./git.ts";
 import type { Role } from "./pi.ts";
+import type { PrintRole } from "./qoder.ts";
 import { prepareReview } from "./review.ts";
 import { DONE, FAILED, formatAsk, openDaemon, request, type ClientRequest, type DaemonMessage } from "./protocol.ts";
 import {
@@ -28,7 +29,7 @@ import {
 } from "./store.ts";
 
 const USAGE = `用法：
-  pi-bridge send <会话名> [--role advisor|executor] [--engine pi|qoder] [--cwd <目录>] [--model <模型>] [--thinking <等级>] [--worktree] <消息|->
+  pi-bridge send <会话名> [--role advisor|editor|executor] [--engine pi|qoder] [--cwd <目录>] [--model <模型>] [--thinking <等级>] [--worktree] <消息|->
   pi-bridge watch <会话名>
   pi-bridge list
   pi-bridge rm <会话名> [--force]
@@ -42,11 +43,12 @@ const USAGE = `用法：
   pi-bridge stop <会话名>
 
 消息写 - 时从 stdin 读取。首次 send 创建会话并绑定 cwd（默认当前目录），之后固定在该目录运行。
---role 缺省为 advisor：只读，跑完即退出。executor 在常驻进程中运行，没有常驻进程时自动启动，空闲 30 分钟自动退出；
-pi 提问时 send 打印提问并以退出码 2 退出，用 answer 回答后继续等待。会话有常驻进程时，先 stop 才能以 advisor 发送。
+--role 缺省为 advisor：只读，跑完即退出。editor 仅 qoder 引擎可用：可编辑工作目录内的文件（Edit/Write，无 Bash），同样跑完即退出。
+executor 在常驻进程中运行（仅 pi 引擎），没有常驻进程时自动启动，空闲 30 分钟自动退出；
+pi 提问时 send 打印提问并以退出码 2 退出，用 answer 回答后继续等待。会话有常驻进程时，先 stop 才能以 advisor/editor 发送。
 创建会话时加 --worktree，会在 <仓库>/.pi-bridge/worktrees/<会话名> 建立分支为 pi/<会话名> 的 worktree 并在其中运行。
 --engine 选择被调用方：pi（缺省）或 qoder（qoderclicn）。只在建会话时生效并绑定到该会话，续接时以绑定为准；
-也可用环境变量 PI_BRIDGE_ENGINE 设新建缺省。qoder 引擎第一版只支持 advisor 与 review，executor 仍走 pi。`;
+也可用环境变量 PI_BRIDGE_ENGINE 设新建缺省。qoder 引擎支持 advisor、editor 与 review；executor 仍走 pi。`;
 
 const EXIT_ASK = 2;
 /** watch 启动后等待任务开始的时长，覆盖 send 与 watch 同时启动时的先后顺序，以及常驻进程的启动超时 */
@@ -174,11 +176,19 @@ async function send(argv: string[]): Promise<number> {
   assertName(name);
   if (positionals.length !== 2) throw new Error("需要恰好一条消息，含空格时请加引号，或用 - 从 stdin 读取");
   const role = values.role as Role;
-  if (role !== "advisor" && role !== "executor") throw new Error(`--role 只能是 advisor 或 executor：${role}`);
+  if (role !== "advisor" && role !== "editor" && role !== "executor") {
+    throw new Error(`--role 只能是 advisor、editor 或 executor：${role}`);
+  }
   const engine = resolveEngine(values.engine);
-  // executor 只支持 pi：会话已绑定则以绑定为准，否则以本次解析出的引擎为准
-  if (role === "executor" && (readRecord(name)?.engine ?? engine) === "qoder") {
-    throw new Error("qoder 引擎第一版只支持 advisor（含 review）；executor 请用 pi（--engine pi，且不要设 PI_BRIDGE_ENGINE=qoder）");
+  // 会话已绑定引擎则以绑定为准，否则以本次解析出的引擎为准
+  const effectiveEngine = readRecord(name)?.engine ?? engine;
+  // executor（常驻进程、中途提问）只支持 pi
+  if (role === "executor" && effectiveEngine === "qoder") {
+    throw new Error("qoder 引擎暂不支持 executor（常驻进程与中途提问）；executor 请用 pi（--engine pi，且不要设 PI_BRIDGE_ENGINE=qoder）");
+  }
+  // editor（可写文件）只支持 qoder：pi 侧对应的能力是 executor
+  if (role === "editor" && effectiveEngine !== "qoder") {
+    throw new Error("--role editor 仅 qoder 引擎可用：加 --engine qoder（或设 PI_BRIDGE_ENGINE=qoder）；pi 侧请用 --role executor");
   }
   const message = await readMessage(raw);
   const opts: SendOptions = {
@@ -189,19 +199,19 @@ async function send(argv: string[]): Promise<number> {
     engine,
     engineExplicit: values.engine !== undefined,
   };
-  return role === "advisor" ? sendAdvisor(name, message, opts) : sendExecutor(name, message, opts);
+  return role === "executor" ? sendExecutor(name, message, opts) : sendPrint(name, message, role, opts);
 }
 
-async function sendAdvisor(name: string, message: string, opts: SendOptions): Promise<number> {
+async function sendPrint(name: string, message: string, role: PrintRole, opts: SendOptions): Promise<number> {
   const daemon = await openDaemon(name);
   if (daemon) {
     daemon.destroy();
-    throw new Error(`会话 ${name} 有常驻进程，先 pi-bridge stop ${name}（正在执行的任务会被中止），再以 advisor 发送`);
+    throw new Error(`会话 ${name} 有常驻进程，先 pi-bridge stop ${name}（正在执行的任务会被中止），再以 ${role} 发送`);
   }
   const release = acquireLock(name);
   try {
     const { record, isNew } = ensureRecord(name, opts.cwd, opts.worktree, opts.engine, opts.engineExplicit);
-    return await runPrint(record, isNew, message, { model: opts.model, thinking: opts.thinking });
+    return await runPrint(record, isNew, message, { model: opts.model, thinking: opts.thinking, role });
   } finally {
     release();
   }
@@ -210,9 +220,11 @@ async function sendAdvisor(name: string, message: string, opts: SendOptions): Pr
 interface PrintOptions {
   model?: string;
   thinking?: string;
+  /** 缺省 advisor（只读）；editor 仅 qoder 引擎，可写工作目录内的文件 */
+  role?: PrintRole;
 }
 
-/** 以只读顾问身份运行一轮（引擎取会话绑定的 record.engine）；调用方须持有会话锁。footer 附在回复与错误信息末尾 */
+/** 以 print 模式运行一轮（引擎取会话绑定的 record.engine）；调用方须持有会话锁。footer 附在回复与错误信息末尾 */
 async function runPrint(
   record: SessionRecord,
   isNew: boolean,
@@ -225,6 +237,7 @@ async function runPrint(
   const progress = (line: string): void => appendFileSync(log, `${line}\n`);
   const result = await runAdvisor({
     engine: record.engine ?? "pi",
+    role: opts.role ?? "advisor",
     sessionName: record.name,
     sessionId: sessionIdOf(record),
     cwd: record.cwd,

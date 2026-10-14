@@ -1,6 +1,6 @@
 import type { RunResult } from "./events.ts";
 import { ADVISOR_ARGS, modelArgs, runPi } from "./pi.ts";
-import { nameToUuid, runQoder } from "./qoder.ts";
+import { nameToUuid, runQoder, type PrintRole } from "./qoder.ts";
 
 export type Engine = "pi" | "qoder";
 
@@ -18,6 +18,8 @@ export function resolveEngine(flag?: string): Engine {
 export interface AdvisorRunOptions {
   /** 由谁承接这一轮 */
   engine: Engine;
+  /** print 模式角色：advisor 只读，editor 可写文件（仅 qoder 支持 editor） */
+  role: PrintRole;
   /** pi-bridge 会话名：用作 pi 的 --name，以及 qoder UUID 的派生源 */
   sessionName: string;
   /** pi 的 session-id（会话名，或旧记录里的 UUID） */
@@ -30,7 +32,7 @@ export interface AdvisorRunOptions {
   onProgress: (line: string) => void;
 }
 
-/** 以只读顾问身份跑一轮；具体由谁承接取决于 opts.engine */
+/** 以 print 模式跑一轮（advisor 只读 / editor 可写文件）；具体由谁承接取决于 opts.engine */
 export function runAdvisor(opts: AdvisorRunOptions): Promise<RunResult> {
   if (opts.engine === "qoder") {
     return runQoder({
@@ -38,6 +40,7 @@ export function runAdvisor(opts: AdvisorRunOptions): Promise<RunResult> {
       cwd: opts.cwd,
       message: opts.message,
       isNew: opts.isNew,
+      role: opts.role,
       model: opts.model,
       thinking: opts.thinking,
       onProgress: opts.onProgress,

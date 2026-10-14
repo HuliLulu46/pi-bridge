@@ -16,7 +16,7 @@ const SETTLE_GRACE_MS = 2000;
 /** pi-code 按子代理处理：跳过 SessionStart/UserPromptSubmit/Stop 等会话级 hook（openviking 召回与记忆写入），保留工具级 hook */
 export const PI_ENV = { ...process.env, PI_CODE_SUBAGENT: "1" };
 
-export type Role = "advisor" | "executor";
+export type Role = "advisor" | "editor" | "executor";
 
 /** 顾问只读：不加载扩展（pi-code 注入的 Claude skill 也随之关闭），只给只读的内置工具 */
 export const ADVISOR_ARGS = ["--no-extensions", "--tools", "read,grep,find,ls"];

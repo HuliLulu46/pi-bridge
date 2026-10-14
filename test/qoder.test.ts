@@ -73,11 +73,44 @@ test("出错或被拦截的工具调用附在回复末尾", () => {
   assert.match(result.stdout, /- Bash: Blocked: needs permission/);
 });
 
-test("qoder 引擎下 executor 被拒绝（第一版只做 advisor）", () => {
+test("qoder 引擎下 executor 被拒绝（常驻进程与中途提问仍归 pi）", () => {
   const result = run(["send", "s1", "--role", "executor", "hello"]);
   assert.equal(result.code, 1);
-  assert.match(result.stderr, /只支持 advisor/);
+  assert.match(result.stderr, /暂不支持 executor/);
   assert.deepEqual(qoderCalls(), []);
+});
+
+test("--role editor：工具集加 Edit/Write，权限用 accept_edits，仍是一次性 print 运行", () => {
+  const result = run(["send", "s1", "--role", "editor", "改一下 README"]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stdout, "echo:改一下 README\n");
+  const argv = qoderCalls()[0]!.argv;
+  assert.deepEqual(argv.slice(argv.indexOf("--tools"), argv.indexOf("--tools") + 6), [
+    "--tools",
+    "Read",
+    "Grep",
+    "Glob",
+    "Edit",
+    "Write",
+  ]);
+  assert.deepEqual(argv.slice(argv.indexOf("--permission-mode"), argv.indexOf("--permission-mode") + 2), [
+    "--permission-mode",
+    "accept_edits",
+  ]);
+  assert.ok(argv.includes("--strict-mcp-config"));
+  assert.ok(argv.includes("-p"));
+  assert.equal(qoderSessionIdOf(argv), nameToUuid("s1"));
+});
+
+test("--role editor 续接同一会话：第二次 send 用 --resume，且 advisor/editor 可混用同一会话", () => {
+  assert.equal(run(["send", "s1", "--role", "editor", "先改文件"]).code, 0);
+  assert.equal(run(["send", "s1", "再看看改得对不对"]).code, 0);
+  const [a, b] = qoderCalls();
+  assert.ok(a!.argv.includes("--session-id"));
+  assert.ok(b!.argv.includes("--resume"));
+  assert.equal(qoderSessionIdOf(a!.argv), qoderSessionIdOf(b!.argv));
+  assert.ok(a!.argv.includes("Write"));
+  assert.deepEqual(b!.argv.slice(b!.argv.indexOf("--tools"), b!.argv.indexOf("--tools") + 4), ["--tools", "Read", "Grep", "Glob"]);
 });
 
 test("review 也走 qoderclicn：只读工具、stream-json、评审会话名派生 UUID", () => {
@@ -175,11 +208,11 @@ test("--engine 只接受 pi 或 qoder", () => {
   assert.match(result.stderr, /只能是 pi 或 qoder/);
 });
 
-test("--engine qoder 下 executor 被拒绝（第一版 executor 仍归 pi）", () => {
+test("--engine qoder 下 executor 被拒绝（executor 仍归 pi）", () => {
   setup();
   const result = run(["send", "s1", "--role", "executor", "--engine", "qoder", "hello"]);
   assert.equal(result.code, 1);
-  assert.match(result.stderr, /只支持 advisor/);
+  assert.match(result.stderr, /暂不支持 executor/);
   assert.equal(qoderCalls().length, 0);
 });
 

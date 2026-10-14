@@ -90,14 +90,23 @@ pi-bridge send design-review --engine qoder "只读评审这份方案，指出�
 pi-bridge review --engine qoder --base main
 ```
 
-也可用环境变量 `PI_BRIDGE_ENGINE=pi|qoder` 设**新建会话**的缺省（`--engine` 优先于它）。引擎在会话首次创建时绑定，续接以绑定为准；对已存在的会话传入不同的 `--engine` 会报错，要换引擎就换一个会话名。qoder 引擎第一版**只支持 advisor 与 review**（只读顾问），executor 仍由 pi 承接。
+也可用环境变量 `PI_BRIDGE_ENGINE=pi|qoder` 设**新建会话**的缺省（`--engine` 优先于它）。引擎在会话首次创建时绑定，续接以绑定为准；对已存在的会话传入不同的 `--engine` 会报错，要换引擎就换一个会话名。qoder 引擎支持 **advisor、editor 与 review**；executor（常驻进程、中途提问）仍由 pi 承接。
 
-实现方式：`pi-bridge` 会话名被确定性地映射成一个 UUID（qoderclicn 的 `--session-id` 要求合法 UUID），首次用 `--session-id` 建会话、之后用 `--resume` 续接；每轮以 `-p --output-format stream-json` 运行，解析 `assistant`/`user`/`result` 事件得到回复与工具进度。只读隔离用 `--tools Read Grep Glob` + `--strict-mcp-config`，并加 `--permission-mode bypass_permissions`——工具已被限制为只读三件套、没有写入或执行能力可绕过，放行权限确认只是让读操作（含工作目录外的绝对路径）免打断。可用 `QODER_BIN` 指定 qoderclicn 的路径。
+qoder 的编辑模式用 `--role editor`：
 
-第一版的边界：
+```bash
+pi-bridge send fix-login --role editor --engine qoder "把 src/login/form.ts 的空密码校验补上，并更新对应测试"
+```
 
-- **只支持 advisor 与 review**。`--role executor` 在 qoder 引擎下会直接报错；executor 仍由 pi 承接。
-- **没有“中途提问”**。pi 的 executor 能卡住回头问，靠的是它专有的对话协议；qoderclicn 侧要用 SDK 的进程内 MCP 工具复刻，留待后续版本。因此 qoder advisor 的疑问只会写在最终回复里，由主控在下一轮回答（与 pi 的 advisor 一致）。
+editor 在只读三件套之外加 `Edit`/`Write`，可以编辑会话工作目录内的文件；没有 Bash（不能跑命令、不能提交），不加载外部 MCP。权限用 `accept_edits`：目录内的编辑自动放行，目录外或需要确认的操作被自动拒绝并列在回复末尾。和 advisor 一样是一次性运行（跑完即退出），没有常驻进程，因此不支持 steer/answer/abort，进度用 `watch` 看；同一会话可以 advisor/editor 混用，上下文不断。
+
+实现方式：`pi-bridge` 会话名被确定性地映射成一个 UUID（qoderclicn 的 `--session-id` 要求合法 UUID），首次用 `--session-id` 建会话、之后用 `--resume` 续接；每轮以 `-p --output-format stream-json` 运行，解析 `assistant`/`user`/`result` 事件得到回复与工具进度。只读隔离用 `--tools Read Grep Glob` + `--strict-mcp-config`，并加 `--permission-mode bypass_permissions`——工具已被限制为只读三件套、没有写入或执行能力可绕过，放行权限确认只是让读操作（含工作目录外的绝对路径）免打断。editor 则用 `--tools Read Grep Glob Edit Write` + `--permission-mode accept_edits`。可用 `QODER_BIN` 指定 qoderclicn 的路径。
+
+当前的边界：
+
+- **executor 仍归 pi**。`--role executor` 在 qoder 引擎下会直接报错；`--role editor` 反过来只对 qoder 会话可用（pi 侧改代码用 executor）。
+- **没有“中途提问”**。pi 的 executor 能卡住回头问，靠的是它专有的对话协议；qoderclicn 侧要用 SDK 的进程内 MCP 工具复刻，留待后续版本。因此 qoder advisor/editor 的疑问只会写在最终回复里，由主控在下一轮回答（与 pi 的 advisor 一致）。
+- **editor 没有 Bash，也没有改动清单**。不能跑测试、不能提交；验收时自己看 `git diff`（回复末尾不附 executor 那样的改动文件清单）。
 
 ## 安装
 

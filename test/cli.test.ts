@@ -64,11 +64,25 @@ test("缺省以 advisor 运行：print 模式、只读参数，--model 与 --thi
   assert.ok(!piCalls()[1]!.argv.includes("--model"));
 });
 
-test("--role 只接受 advisor 或 executor", () => {
+test("--role 只接受 advisor、editor 或 executor", () => {
   const result = run(["send", "s1", "--role", "boss", "hello"]);
   assert.equal(result.code, 1);
-  assert.match(result.stderr, /--role 只能是 advisor 或 executor/);
+  assert.match(result.stderr, /--role 只能是 advisor、editor 或 executor/);
   assert.equal(run(["list"]).stdout, "（没有会话）\n");
+});
+
+test("--role editor 仅 qoder 引擎可用：pi 会话（含已绑定 pi）被拒绝", () => {
+  const result = run(["send", "s1", "--role", "editor", "hello"]);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /--role editor 仅 qoder 引擎可用/);
+  assert.deepEqual(piCalls(), []);
+  assert.equal(run(["list"]).stdout, "（没有会话）\n");
+
+  run(["send", "s2", "hello"]);
+  const bound = run(["send", "s2", "--role", "editor", "--engine", "qoder", "hello"]);
+  assert.equal(bound.code, 1);
+  assert.match(bound.stderr, /--role editor 仅 qoder 引擎可用/);
+  assert.equal(piCalls().length, 1);
 });
 
 test("同一会话运行中再次 send 会被锁拒绝", async () => {
