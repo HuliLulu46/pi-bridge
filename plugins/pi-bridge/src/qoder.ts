@@ -14,8 +14,10 @@ export interface QoderRunOptions {
   model?: string;
   thinking?: string;
   systemPrompt?: string;
-  /** qoderclicn 产出第一个 stdout 事件时触发一次：底层会话已确实存在（--session-id 已落盘） */
+  /** qoderclicn 产出本次会话的 init 事件时触发：底层会话已确实存在（--session-id 已落盘） */
   onStarted?: () => void;
+  /** 收到 SIGINT/SIGTERM（用户取消）或进程被信号终止时触发；取消后不允许回退重试 */
+  onCancelled?: () => void;
   onProgress: (line: string) => void;
 }
 
@@ -132,8 +134,9 @@ export function createQoderRunTracker(onProgress: (line: string) => void) {
 /**
  * 以 print 模式跑一轮 qoderclicn（advisor 只读 / editor 可写文件）；进程结束（result 事件后自行退出）即完成。
  * 建会话时 UUID 已被占用（rm 删了 bridge 记录但底层会话文件还在）则回退为 --resume 重试一次，
- * 兑现“rm 后同名再 send 会续接”。回退只在首次尝试尚未开始（没有 init 事件、没有任何工具进度）
- * 且错误明确是本次 UUID 的会话冲突时才发生，避免把无关的占用错误或跑了一半的任务重放。
+ * 兑现“rm 后同名再 send 会续接”。回退只在首次尝试尚未开始（没有 init 事件）、未被取消
+ * （没有收到 SIGINT/SIGTERM，也没有被信号终止）且错误明确是本次 UUID 的会话冲突时才发生，
+ * 避免把无关的占用错误、跑了一半或用户刚取消的任务重放。
  */
 export async function runQoder(opts: QoderRunOptions): Promise<RunResult> {
   let started = false;
@@ -141,16 +144,22 @@ export async function runQoder(opts: QoderRunOptions): Promise<RunResult> {
     started = true;
     opts.onStarted?.();
   };
-  const result = await qoderAttempt({ ...opts, onStarted: markStarted });
-  if (opts.isNew && !started && !result.ok && isSessionIdConflict(result.error, opts.sessionId)) {
-    return qoderAttempt({ ...opts, isNew: false, onStarted: markStarted });
+  let cancelled = false;
+  const attemptOpts: QoderRunOptions = {
+    ...opts,
+    onStarted: markStarted,
+    onCancelled: () => (cancelled = true),
+  };
+  const result = await qoderAttempt(attemptOpts);
+  if (opts.isNew && !started && !cancelled && !result.ok && isSessionIdConflict(result.error, opts.sessionId)) {
+    return qoderAttempt({ ...attemptOpts, isNew: false });
   }
   return result;
 }
 
-/** qoderclicn 建会话撞已有 UUID 的报错：Error: Session ID <uuid> is already in use. */
+/** qoderclicn 建会话撞已有 UUID 的报错形如：Error: Session ID <uuid> is already in use. */
 export function isSessionIdConflict(error: string | undefined, sessionId: string): boolean {
-  return error !== undefined && error.includes("already in use") && error.includes(sessionId);
+  return error !== undefined && error.includes(`Session ID ${sessionId} is already in use`);
 }
 
 function qoderAttempt(opts: QoderRunOptions): Promise<RunResult> {
@@ -206,6 +215,7 @@ function qoderAttempt(opts: QoderRunOptions): Promise<RunResult> {
   child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
 
   const forward = (signal: NodeJS.Signals): void => {
+    opts.onCancelled?.();
     child.kill(signal);
   };
   process.on("SIGINT", forward);
@@ -222,6 +232,8 @@ function qoderAttempt(opts: QoderRunOptions): Promise<RunResult> {
     });
     child.on("close", (code, signal) => {
       cleanup();
+      // 被信号终止视同取消（如 shell 直接向子进程发信号），不允许回退重试
+      if (signal) opts.onCancelled?.();
       resolve(
         tracker.result(
           () => Buffer.concat(stderr).toString("utf8").trim() || `qoderclicn 异常退出（${signal ?? `退出码 ${code}`}）`,

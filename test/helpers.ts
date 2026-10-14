@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const CLI = fileURLToPath(new URL("../plugins/pi-bridge/src/cli.ts", import.meta.url));
+const CLI_ENTRY = fileURLToPath(new URL("../plugins/pi-bridge/src/cli.ts", import.meta.url));
+export const CLI = CLI_ENTRY;
 const FAKE_PI = fileURLToPath(new URL("./fake-pi.mjs", import.meta.url));
 const FAKE_QODER = fileURLToPath(new URL("./fake-qoder.mjs", import.meta.url));
 
@@ -53,7 +54,8 @@ export function initRepo(dir: string): void {
   gitIn(dir, "commit", "-q", "-m", "init");
 }
 
-function env(): NodeJS.ProcessEnv {
+/** 运行 CLI 用的完整环境（fake 二进制、隔离 home 等）；供需要直接 spawn 的测试使用 */
+export function env(): NodeJS.ProcessEnv {
   return {
     ...process.env,
     ...GIT_ENV,

@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { beforeEach, test } from "node:test";
-import { initRepo, piCalls, qoderCalls, qoderSessionIdOf, run, setEnv, setup } from "./helpers.ts";
+import { CLI, env, initRepo, piCalls, qoderCalls, qoderSessionIdOf, run, setEnv, setup } from "./helpers.ts";
 import { createQoderRunTracker, isSessionIdConflict, nameToUuid } from "../plugins/pi-bridge/src/qoder.ts";
 
 let home: string;
@@ -167,18 +169,31 @@ test("初始化前失败（有 stdout 但没有 init 事件）不写 sessionStar
   assert.ok(!argv.includes("--resume"));
 });
 
-test("回退只认本次 UUID 的会话冲突：无关的 already in use 错误不触发重试", () => {
+test("回退只认本次 UUID 的会话冲突句式：UUID 出现在无关占用错误里也不触发重试", () => {
   const result = run(["send", "s1", `portuse:${nameToUuid("s1")}`]);
   assert.equal(result.code, 1);
   assert.match(result.stderr, /already in use/);
   assert.equal(qoderCalls().length, 1);
 });
 
-test("isSessionIdConflict 只匹配含本次 UUID 的占用错误", () => {
-  assert.equal(isSessionIdConflict(`Error: Session ID ${nameToUuid("s1")} is already in use.`, nameToUuid("s1")), true);
-  assert.equal(isSessionIdConflict("Error: address already in use", nameToUuid("s1")), false);
-  assert.equal(isSessionIdConflict(`Session ID ${nameToUuid("other")} is already in use.`, nameToUuid("s1")), false);
-  assert.equal(isSessionIdConflict(undefined, nameToUuid("s1")), false);
+test("isSessionIdConflict 只匹配 'Session ID <uuid> is already in use' 句式", () => {
+  const id = nameToUuid("s1");
+  assert.equal(isSessionIdConflict(`Error: Session ID ${id} is already in use.`, id), true);
+  assert.equal(isSessionIdConflict(`session_id=${id}\nError: bind: address already in use`, id), false);
+  assert.equal(isSessionIdConflict("Error: address already in use", id), false);
+  assert.equal(isSessionIdConflict(`Session ID ${nameToUuid("other")} is already in use.`, id), false);
+  assert.equal(isSessionIdConflict(undefined, id), false);
+});
+
+test("取消后不回退：建会话冲突期间 SIGTERM 终止，不再发起 --resume 重试", async () => {
+  const child = spawn("node", [CLI, "send", "s1", "inuse"], { cwd: work, env: env() });
+  await sleep(300);
+  child.kill("SIGTERM");
+  await new Promise((resolve) => child.on("close", resolve));
+  await sleep(300);
+  const calls = qoderCalls();
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0]!.argv.includes("--session-id"));
 });
 
 test("旧记录（无 engine 字段）在 PI_BRIDGE_ENGINE=qoder 下按 pi 处理，跑完回填 engine", () => {
