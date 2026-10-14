@@ -67,6 +67,8 @@ export interface QoderEvent {
   is_error?: boolean;
   /** result 事件里的最终回复文本 */
   result?: string;
+  /** system/init 与 result 事件携带的会话 UUID */
+  session_id?: string;
   message?: { role?: string; content?: string | QoderBlock[] };
 }
 
@@ -130,14 +132,25 @@ export function createQoderRunTracker(onProgress: (line: string) => void) {
 /**
  * 以 print 模式跑一轮 qoderclicn（advisor 只读 / editor 可写文件）；进程结束（result 事件后自行退出）即完成。
  * 建会话时 UUID 已被占用（rm 删了 bridge 记录但底层会话文件还在）则回退为 --resume 重试一次，
- * 兑现“rm 后同名再 send 会续接”。
+ * 兑现“rm 后同名再 send 会续接”。回退只在首次尝试尚未开始（没有 init 事件、没有任何工具进度）
+ * 且错误明确是本次 UUID 的会话冲突时才发生，避免把无关的占用错误或跑了一半的任务重放。
  */
 export async function runQoder(opts: QoderRunOptions): Promise<RunResult> {
-  const result = await qoderAttempt(opts);
-  if (opts.isNew && !result.ok && result.error?.includes("already in use")) {
-    return qoderAttempt({ ...opts, isNew: false });
+  let started = false;
+  const markStarted = (): void => {
+    started = true;
+    opts.onStarted?.();
+  };
+  const result = await qoderAttempt({ ...opts, onStarted: markStarted });
+  if (opts.isNew && !started && !result.ok && isSessionIdConflict(result.error, opts.sessionId)) {
+    return qoderAttempt({ ...opts, isNew: false, onStarted: markStarted });
   }
   return result;
+}
+
+/** qoderclicn 建会话撞已有 UUID 的报错：Error: Session ID <uuid> is already in use. */
+export function isSessionIdConflict(error: string | undefined, sessionId: string): boolean {
+  return error !== undefined && error.includes("already in use") && error.includes(sessionId);
 }
 
 function qoderAttempt(opts: QoderRunOptions): Promise<RunResult> {
@@ -172,19 +185,20 @@ function qoderAttempt(opts: QoderRunOptions): Promise<RunResult> {
   const tracker = createQoderRunTracker(opts.onProgress);
   const split = createLineSplitter();
   const stderr: Buffer[] = [];
-  let started = false;
+  let sawInit = false;
 
   child.stdout.on("data", (chunk: Buffer) => {
-    if (!started) {
-      started = true;
-      opts.onStarted?.();
-    }
     for (const line of split(chunk)) {
       let event: QoderEvent;
       try {
         event = JSON.parse(line) as QoderEvent;
       } catch {
         continue;
+      }
+      // 会话确实建好的标志：init 事件且 UUID 是本次的。启动诊断等杂散输出不算
+      if (!sawInit && event.type === "system" && event.subtype === "init" && event.session_id === opts.sessionId) {
+        sawInit = true;
+        opts.onStarted?.();
       }
       tracker.handle(event);
     }

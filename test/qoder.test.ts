@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { beforeEach, test } from "node:test";
 import { initRepo, piCalls, qoderCalls, qoderSessionIdOf, run, setEnv, setup } from "./helpers.ts";
-import { createQoderRunTracker, nameToUuid } from "../plugins/pi-bridge/src/qoder.ts";
+import { createQoderRunTracker, isSessionIdConflict, nameToUuid } from "../plugins/pi-bridge/src/qoder.ts";
 
 let home: string;
 let work: string;
@@ -152,6 +152,63 @@ test("建会话撞已存在的 UUID（rm 后底层会话仍在）时回退 --res
   assert.ok(calls[0]!.argv.includes("--session-id"));
   assert.ok(calls[1]!.argv.includes("--resume"));
   assert.equal(qoderSessionIdOf(calls[0]!.argv), qoderSessionIdOf(calls[1]!.argv));
+});
+
+test("初始化前失败（有 stdout 但没有 init 事件）不写 sessionStarted，重试仍走 --session-id", () => {
+  const failed = run(["send", "s1", "nostart"]);
+  assert.equal(failed.code, 1);
+  assert.match(failed.stderr, /init failed/);
+  const record = JSON.parse(readFileSync(join(home, "sessions", "s1.json"), "utf8")) as { sessionStarted?: boolean };
+  assert.equal(record.sessionStarted, undefined);
+
+  assert.equal(run(["send", "s1", "hello"]).code, 0);
+  const argv = qoderCalls()[1]!.argv;
+  assert.ok(argv.includes("--session-id"));
+  assert.ok(!argv.includes("--resume"));
+});
+
+test("回退只认本次 UUID 的会话冲突：无关的 already in use 错误不触发重试", () => {
+  const result = run(["send", "s1", `portuse:${nameToUuid("s1")}`]);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /already in use/);
+  assert.equal(qoderCalls().length, 1);
+});
+
+test("isSessionIdConflict 只匹配含本次 UUID 的占用错误", () => {
+  assert.equal(isSessionIdConflict(`Error: Session ID ${nameToUuid("s1")} is already in use.`, nameToUuid("s1")), true);
+  assert.equal(isSessionIdConflict("Error: address already in use", nameToUuid("s1")), false);
+  assert.equal(isSessionIdConflict(`Session ID ${nameToUuid("other")} is already in use.`, nameToUuid("s1")), false);
+  assert.equal(isSessionIdConflict(undefined, nameToUuid("s1")), false);
+});
+
+test("旧记录（无 engine 字段）在 PI_BRIDGE_ENGINE=qoder 下按 pi 处理，跑完回填 engine", () => {
+  const now = new Date().toISOString();
+  mkdirSync(join(home, "sessions"), { recursive: true });
+  writeFileSync(join(home, "sessions", "old.json"), JSON.stringify({ name: "old", cwd: work, createdAt: now, updatedAt: now }));
+  setEnv({ PI_BRIDGE_ENGINE: "qoder" });
+
+  const executor = run(["send", "old", "--role", "executor", "hello"]);
+  assert.equal(executor.code, 0, executor.stderr);
+  assert.equal(piCalls().length, 1);
+
+  const editor = run(["send", "old", "--role", "editor", "hello"]);
+  assert.equal(editor.code, 1);
+  assert.match(editor.stderr, /--role editor 仅 qoder 引擎可用/);
+
+  assert.equal(run(["stop", "old"]).code, 0);
+  assert.equal(run(["send", "old", "hello"]).code, 0);
+  const record = JSON.parse(readFileSync(join(home, "sessions", "old.json"), "utf8")) as { engine?: string };
+  assert.equal(record.engine, "pi");
+});
+
+test("常驻进程存活时，显式 --engine 与绑定引擎冲突会被拒绝", () => {
+  setup();
+  const first = run(["send", "s1", "--role", "executor", "hello"]);
+  assert.equal(first.code, 0, first.stderr);
+  const conflict = run(["send", "s1", "--role", "executor", "--engine", "qoder", "again"]);
+  assert.equal(conflict.code, 1);
+  assert.match(conflict.stderr, /绑定的引擎是 pi，不能改用 qoder/);
+  assert.equal(run(["stop", "s1"]).code, 0);
 });
 
 test("review 也走 qoderclicn：只读工具、stream-json、评审会话名派生 UUID", () => {

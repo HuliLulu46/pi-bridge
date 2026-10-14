@@ -181,8 +181,9 @@ async function send(argv: string[]): Promise<number> {
     throw new Error(`--role 只能是 advisor、editor 或 executor：${role}`);
   }
   const engine = resolveEngine(values.engine);
-  // 会话已绑定引擎则以绑定为准，否则以本次解析出的引擎为准
-  const effectiveEngine = readRecord(name)?.engine ?? engine;
+  // 会话已存在（含没有 engine 字段的旧记录，实际由 pi 承接）以记录为准，否则以本次解析出的引擎为准
+  const existing = readRecord(name);
+  const effectiveEngine = existing ? existing.engine ?? "pi" : engine;
   // executor（常驻进程、中途提问）只支持 pi
   if (role === "executor" && effectiveEngine === "qoder") {
     throw new Error("qoder 引擎暂不支持 executor（常驻进程与中途提问）；executor 请用 pi（--engine pi，且不要设 PI_BRIDGE_ENGINE=qoder）");
@@ -252,7 +253,8 @@ async function runPrint(
     onStarted: () => (started = true),
     onProgress: progress,
   });
-  writeRecord({ ...record, ...(started ? { sessionStarted: true } : {}), updatedAt: new Date().toISOString() });
+  // engine 回填：没有该字段的旧记录跑完一轮后补上实际承接的引擎，之后角色守卫与运行不再依赖环境
+  writeRecord({ ...record, engine, ...(started ? { sessionStarted: true } : {}), updatedAt: new Date().toISOString() });
 
   const notice = `${toolNotice(result.failedTools)}${footer}`;
   if (result.ok) {
@@ -269,14 +271,20 @@ async function runPrint(
 async function sendExecutor(name: string, message: string, opts: SendOptions): Promise<number> {
   let daemon = await openDaemon(name);
   if (daemon) {
-    const boundCwd = readRecord(name)?.cwd;
-    const conflict = opts.worktree
-      ? `会话 ${name} 已存在，worktree 只能在创建会话时指定`
-      : opts.cwd && resolve(opts.cwd) !== boundCwd
-        ? `会话 ${name} 绑定在 ${boundCwd}，不能改到 ${resolve(opts.cwd)}`
-        : opts.model || opts.thinking
-          ? "常驻进程运行中，--model 与 --thinking 只在启动常驻进程时生效"
-          : undefined;
+    const record = readRecord(name);
+    const boundCwd = record?.cwd;
+    // 常驻进程路径不经过 ensureRecord，显式引擎冲突要在这里查
+    const boundEngine = record?.engine ?? "pi";
+    const conflict =
+      opts.engineExplicit && opts.engine !== boundEngine
+        ? `会话 ${name} 绑定的引擎是 ${boundEngine}，不能改用 ${opts.engine}`
+        : opts.worktree
+          ? `会话 ${name} 已存在，worktree 只能在创建会话时指定`
+          : opts.cwd && resolve(opts.cwd) !== boundCwd
+            ? `会话 ${name} 绑定在 ${boundCwd}，不能改到 ${resolve(opts.cwd)}`
+            : opts.model || opts.thinking
+              ? "常驻进程运行中，--model 与 --thinking 只在启动常驻进程时生效"
+              : undefined;
     if (conflict) {
       daemon.destroy();
       throw new Error(conflict);
@@ -536,12 +544,15 @@ async function rm(argv: string[]): Promise<number> {
     if (record.worktree) removeWorktree(record.worktree, record.cwd, values.force ?? false);
     removeRecord(name);
     const worktreeNote = record.worktree ? `；worktree 已删除，分支 ${record.worktree.branch} 保留` : "";
+    const engine = record.engine ?? "pi";
     // 旧格式记录的 UUID 只存在于这份记录里，删除后同名 send 会以会话名新建会话
     const resumeNote = record.id
       ? `；这是旧格式会话，同名再 send 会新建会话，旧历史在 ${record.cwd} 执行 pi --session-id ${record.id} 打开`
-      : "，同名再 send 会续接";
+      : engine === "qoder"
+        ? "，同名再 send 加 --engine qoder 会续接（引擎绑定随记录一起删除，缺省引擎不是 qoder 时必须显式指定）"
+        : "，同名再 send 会续接";
     const historyNote =
-      (record.engine ?? "pi") === "qoder"
+      engine === "qoder"
         ? `qoder 会话文件（${nameToUuid(record.name)}，由会话名派生）仍保留`
         : `pi 会话文件（${sessionIdOf(record)}）仍保留`;
     print(`已删除会话 ${name}，${historyNote}${resumeNote}${worktreeNote}`);

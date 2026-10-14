@@ -25,6 +25,19 @@ if (message === "inuse" && argv.includes("--session-id")) {
   process.exit(1);
 }
 
+// 模拟无关的占用错误（如端口）：错误文本含 already in use 但不含本次会话 UUID，不应触发回退
+if (message.startsWith("portuse:")) {
+  process.stderr.write("Error: bind: address already in use\n");
+  process.exit(1);
+}
+
+// 模拟初始化前失败：有 stdout 诊断输出，但没有 init 事件（会话未创建）
+if (message === "nostart") {
+  process.stdout.write("diagnostic: warming up\n");
+  process.stderr.write("Error: init failed before session creation\n");
+  process.exit(1);
+}
+
 emit({ type: "system", subtype: "init", session_id: sessionId, tools: ["Read", "Grep", "Glob"], permissionMode: "default" });
 
 if (message === "blocked") {
