@@ -113,6 +113,47 @@ test("--role editor 续接同一会话：第二次 send 用 --resume，且 advis
   assert.deepEqual(b!.argv.slice(b!.argv.indexOf("--tools"), b!.argv.indexOf("--tools") + 4), ["--tools", "Read", "Grep", "Glob"]);
 });
 
+test("advisor 与 editor 都以 --setting-sources 置空隔离用户/项目设置（含 hook）", () => {
+  assert.equal(run(["send", "s1", "hello"]).code, 0);
+  assert.equal(run(["send", "s2", "--role", "editor", "hello"]).code, 0);
+  for (const call of qoderCalls()) {
+    const argv = call.argv;
+    assert.deepEqual(argv.slice(argv.indexOf("--setting-sources"), argv.indexOf("--setting-sources") + 2), [
+      "--setting-sources",
+      "",
+    ]);
+  }
+});
+
+test("首次启动失败不写 sessionStarted：修好后重试仍用 --session-id 建会话", () => {
+  setEnv({ PI_BRIDGE_ENGINE: "qoder", QODER_BIN: "/nonexistent/qoderclicn" });
+  const failed = run(["send", "s1", "hello"]);
+  assert.equal(failed.code, 1);
+  assert.match(failed.stderr, /无法启动 qoderclicn/);
+  const record = JSON.parse(readFileSync(join(home, "sessions", "s1.json"), "utf8")) as { sessionStarted?: boolean };
+  assert.equal(record.sessionStarted, undefined);
+
+  setEnv({ PI_BRIDGE_ENGINE: "qoder" });
+  const retried = run(["send", "s1", "hello"]);
+  assert.equal(retried.code, 0, retried.stderr);
+  const argv = qoderCalls()[0]!.argv;
+  assert.ok(argv.includes("--session-id"));
+  assert.ok(!argv.includes("--resume"));
+  const after = JSON.parse(readFileSync(join(home, "sessions", "s1.json"), "utf8")) as { sessionStarted?: boolean };
+  assert.equal(after.sessionStarted, true);
+});
+
+test("建会话撞已存在的 UUID（rm 后底层会话仍在）时回退 --resume 续接", () => {
+  const result = run(["send", "s1", "inuse"]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stdout, "echo:inuse\n");
+  const calls = qoderCalls();
+  assert.equal(calls.length, 2);
+  assert.ok(calls[0]!.argv.includes("--session-id"));
+  assert.ok(calls[1]!.argv.includes("--resume"));
+  assert.equal(qoderSessionIdOf(calls[0]!.argv), qoderSessionIdOf(calls[1]!.argv));
+});
+
 test("review 也走 qoderclicn：只读工具、stream-json、评审会话名派生 UUID", () => {
   initRepo(work);
   writeFileSync(join(work, "a.txt"), "changed\n");

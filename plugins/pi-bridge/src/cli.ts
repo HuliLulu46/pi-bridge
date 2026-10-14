@@ -11,6 +11,7 @@ import { preview, toolNotice } from "./events.ts";
 import { createWorktree, removeWorktree, rollbackError, type ReviewScope } from "./git.ts";
 import type { Role } from "./pi.ts";
 import type { PrintRole } from "./qoder.ts";
+import { nameToUuid } from "./qoder.ts";
 import { prepareReview } from "./review.ts";
 import { DONE, FAILED, formatAsk, openDaemon, request, type ClientRequest, type DaemonMessage } from "./protocol.ts";
 import {
@@ -232,22 +233,26 @@ async function runPrint(
   opts: PrintOptions,
   footer = "",
 ): Promise<number> {
+  const engine = record.engine ?? "pi";
   const log = logPath(record.name);
   writeFileSync(log, `[start] ${new Date().toISOString()} ${preview(message)}\n`);
   const progress = (line: string): void => appendFileSync(log, `${line}\n`);
+  // qoder：底层会话可能还没建过（记录新建但首启失败过），以 sessionStarted 为准决定 --session-id/--resume
+  let started = engine === "qoder" && record.sessionStarted === true;
   const result = await runAdvisor({
-    engine: record.engine ?? "pi",
+    engine,
     role: opts.role ?? "advisor",
     sessionName: record.name,
     sessionId: sessionIdOf(record),
     cwd: record.cwd,
     message,
-    isNew,
+    isNew: engine === "qoder" ? !started : isNew,
     model: opts.model,
     thinking: opts.thinking,
+    onStarted: () => (started = true),
     onProgress: progress,
   });
-  writeRecord({ ...record, updatedAt: new Date().toISOString() });
+  writeRecord({ ...record, ...(started ? { sessionStarted: true } : {}), updatedAt: new Date().toISOString() });
 
   const notice = `${toolNotice(result.failedTools)}${footer}`;
   if (result.ok) {
@@ -535,7 +540,11 @@ async function rm(argv: string[]): Promise<number> {
     const resumeNote = record.id
       ? `；这是旧格式会话，同名再 send 会新建会话，旧历史在 ${record.cwd} 执行 pi --session-id ${record.id} 打开`
       : "，同名再 send 会续接";
-    print(`已删除会话 ${name}，pi 会话文件（${sessionIdOf(record)}）仍保留${resumeNote}${worktreeNote}`);
+    const historyNote =
+      (record.engine ?? "pi") === "qoder"
+        ? `qoder 会话文件（${nameToUuid(record.name)}，由会话名派生）仍保留`
+        : `pi 会话文件（${sessionIdOf(record)}）仍保留`;
+    print(`已删除会话 ${name}，${historyNote}${resumeNote}${worktreeNote}`);
     return 0;
   } finally {
     release();

@@ -14,6 +14,8 @@ export interface QoderRunOptions {
   model?: string;
   thinking?: string;
   systemPrompt?: string;
+  /** qoderclicn 产出第一个 stdout 事件时触发一次：底层会话已确实存在（--session-id 已落盘） */
+  onStarted?: () => void;
   onProgress: (line: string) => void;
 }
 
@@ -125,8 +127,20 @@ export function createQoderRunTracker(onProgress: (line: string) => void) {
   };
 }
 
-/** 以 print 模式跑一轮 qoderclicn（advisor 只读 / editor 可写文件）；进程结束（result 事件后自行退出）即完成 */
-export function runQoder(opts: QoderRunOptions): Promise<RunResult> {
+/**
+ * 以 print 模式跑一轮 qoderclicn（advisor 只读 / editor 可写文件）；进程结束（result 事件后自行退出）即完成。
+ * 建会话时 UUID 已被占用（rm 删了 bridge 记录但底层会话文件还在）则回退为 --resume 重试一次，
+ * 兑现“rm 后同名再 send 会续接”。
+ */
+export async function runQoder(opts: QoderRunOptions): Promise<RunResult> {
+  const result = await qoderAttempt(opts);
+  if (opts.isNew && !result.ok && result.error?.includes("already in use")) {
+    return qoderAttempt({ ...opts, isNew: false });
+  }
+  return result;
+}
+
+function qoderAttempt(opts: QoderRunOptions): Promise<RunResult> {
   const sessionArgs = opts.isNew ? ["--session-id", opts.sessionId] : ["--resume", opts.sessionId];
   const editor = opts.role === "editor";
   const args = [
@@ -141,10 +155,13 @@ export function runQoder(opts: QoderRunOptions): Promise<RunResult> {
     // 能让读操作（含工作目录外的绝对路径）像 pi 的顾问一样免打断。
     // editor 用 accept_edits：工作目录内的 Edit/Write 自动放行、目录外仍被拒；没有 Bash，
     // 无头模式下需要确认的操作会被自动拒绝并作为 tool-error 汇报，不会卡住。
-    // 两种角色都不加载任何外部 MCP server。
+    // --strict-mcp-config 不加载外部 MCP server；--setting-sources 置空不加载用户/项目/local 设置，
+    // 否则其中的 hook（如 PreToolUse）会在工具白名单之外执行任意命令，绕过只读隔离。
     "--permission-mode",
     editor ? "accept_edits" : "bypass_permissions",
     "--strict-mcp-config",
+    "--setting-sources",
+    "",
     "--tools",
     ...toolsOf(opts.role),
     "--",
@@ -155,8 +172,13 @@ export function runQoder(opts: QoderRunOptions): Promise<RunResult> {
   const tracker = createQoderRunTracker(opts.onProgress);
   const split = createLineSplitter();
   const stderr: Buffer[] = [];
+  let started = false;
 
   child.stdout.on("data", (chunk: Buffer) => {
+    if (!started) {
+      started = true;
+      opts.onStarted?.();
+    }
     for (const line of split(chunk)) {
       let event: QoderEvent;
       try {

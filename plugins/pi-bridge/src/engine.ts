@@ -29,6 +29,8 @@ export interface AdvisorRunOptions {
   isNew: boolean;
   model?: string;
   thinking?: string;
+  /** 仅 qoder：底层会话确认已创建时触发（首启失败不会触发），用于把 sessionStarted 写回记录 */
+  onStarted?: () => void;
   onProgress: (line: string) => void;
 }
 
@@ -43,6 +45,7 @@ export function runAdvisor(opts: AdvisorRunOptions): Promise<RunResult> {
       role: opts.role,
       model: opts.model,
       thinking: opts.thinking,
+      onStarted: opts.onStarted,
       onProgress: opts.onProgress,
     });
   }

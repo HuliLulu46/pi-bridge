@@ -19,6 +19,8 @@ export interface SessionRecord {
   cwd: string;
   /** 由谁承接这个会话；缺省（含没有该字段的旧记录）视为 pi，建会话时绑定，之后不变 */
   engine?: Engine;
+  /** 仅 qoder：底层会话是否已创建过（首轮成功拿到事件流即置真），决定下一轮用 --session-id 还是 --resume */
+  sessionStarted?: boolean;
   createdAt: string;
   updatedAt: string;
   worktree?: WorktreeInfo;

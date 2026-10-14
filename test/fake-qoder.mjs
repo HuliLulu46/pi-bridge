@@ -19,6 +19,12 @@ if (message === "fail") {
   process.exit(1);
 }
 
+// 模拟 rm 后底层会话文件仍在：--session-id 建会话撞已存在的 UUID
+if (message === "inuse" && argv.includes("--session-id")) {
+  process.stderr.write(`Error: Session ID ${sessionId} is already in use.\n`);
+  process.exit(1);
+}
+
 emit({ type: "system", subtype: "init", session_id: sessionId, tools: ["Read", "Grep", "Glob"], permissionMode: "default" });
 
 if (message === "blocked") {
