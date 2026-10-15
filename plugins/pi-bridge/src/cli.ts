@@ -1,14 +1,14 @@
 import { spawn } from "node:child_process";
-import { appendFileSync, closeSync, existsSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import type { Socket } from "node:net";
-import { resolve } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import type { DaemonOptions } from "./daemon.ts";
 import { resolveEngine, runAdvisor, type Engine } from "./engine.ts";
 import { preview, toolNotice } from "./events.ts";
-import { createWorktree, removeWorktree, rollbackError, type ReviewScope } from "./git.ts";
+import { createWorktree, projectIdentity, removeWorktree, rollbackError, type RepoIdentity, type ReviewScope } from "./git.ts";
 import type { Role } from "./pi.ts";
 import type { PrintRole } from "./qoder.ts";
 import { nameToUuid } from "./qoder.ts";
@@ -32,7 +32,7 @@ import {
 const USAGE = `用法：
   pi-bridge send <会话名> [--role advisor|editor|executor] [--engine pi|qoder] [--cwd <目录>] [--model <模型>] [--thinking <等级>] [--worktree] <消息|->
   pi-bridge watch <会话名>
-  pi-bridge list
+  pi-bridge list [--all | --here] [--active] [--engine pi|qoder]
   pi-bridge rm <会话名> [--force]
   pi-bridge review [--engine pi|qoder] [--staged | --base <分支>] [--cwd <目录>] [--focus <关注点>] [--model <模型>] [--thinking <等级>]
 
@@ -49,7 +49,8 @@ executor 在常驻进程中运行（仅 pi 引擎），没有常驻进程时自�
 pi 提问时 send 打印提问并以退出码 2 退出，用 answer 回答后继续等待。会话有常驻进程时，先 stop 才能以 advisor/editor 发送。
 创建会话时加 --worktree，会在 <仓库>/.pi-bridge/worktrees/<会话名> 建立分支为 pi/<会话名> 的 worktree 并在其中运行。
 --engine 选择被调用方：pi（缺省）或 qoder（qoderclicn）。只在建会话时生效并绑定到该会话，续接时以绑定为准；
-也可用环境变量 PI_BRIDGE_ENGINE 设新建缺省。qoder 引擎支持 advisor、editor 与 review；executor 仍走 pi。`;
+也可用环境变量 PI_BRIDGE_ENGINE 设新建缺省。qoder 引擎支持 advisor、editor 与 review；executor 仍走 pi。
+list 默认只列当前项目（git 主仓库根；worktree 会话与主仓库算同一项目）的会话：--all 列全部，--here 等同默认，--active 只列 running/daemon，--engine 按引擎过滤。`;
 
 const EXIT_ASK = 2;
 /** watch 启动后等待任务开始的时长，覆盖 send 与 watch 同时启动时的先后顺序，以及常驻进程的启动超时 */
@@ -513,15 +514,98 @@ function lastLogLines(name: string): string[] {
   return readFileSync(log, "utf8").split("\n").slice(0, -1);
 }
 
-function list(): number {
-  const records = listRecords();
-  if (records.length === 0) {
-    print("（没有会话）");
-    return 0;
+/** 规范化并解析符号链接，使别名路径与真实路径可比；目录已删除时退回词法绝对路径 */
+function realDir(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
   }
-  for (const record of records) {
+}
+
+/** child 等于 parent 或在 parent 之下；按路径段判断，避免 /ab 命中 /abc，也避免 ..cache 被误判为越界 */
+function isUnderOrEqual(child: string, parent: string): boolean {
+  const rel = relative(parent, child);
+  return rel === "" || (!isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`));
+}
+
+interface DirIdentity {
+  /** 解析符号链接后的目录本身，git 不可用时的兜底身份 */
+  real: string;
+  git: RepoIdentity;
+}
+
+/**
+ * 两处是否属于同一项目。都在 Git 仓库内时按共享 Git 目录的包含关系判定：
+ * common 相等即同一仓库（覆盖其子目录与内置/外置 worktree、--separate-git-dir）；record 的 common 在 current 的 common
+ * 之下即嵌套（现代子模块的 common 为 <父>/.git/modules/<名>）——只依赖 worktree 无关的 common，故从任一 worktree 结果一致。
+ * 有一方不在 Git 仓库内时，退回工作区路径的单向包含（record 在 current 之下）。
+ * 已知限制：old-form 子模块（保留内嵌 <sub>/.git、未 absorbgitdirs）其 common 不在父 common 之下，会被当作独立项目——
+ * 从父仓库执行 list 看不到它，需进入该子模块目录才可见。要精确识别须读 .gitmodules 登记，成本远高于此便利过滤的收益，故不做。
+ */
+function sameProject(record: DirIdentity, current: DirIdentity): boolean {
+  const recordCommon = record.git.common;
+  const currentCommon = current.git.common;
+  if (recordCommon !== undefined && currentCommon !== undefined) return isUnderOrEqual(recordCommon, currentCommon);
+  return isUnderOrEqual(record.git.toplevel ?? record.real, current.git.toplevel ?? current.real);
+}
+
+function list(argv: string[]): number {
+  const { values } = parseArgs({
+    args: argv,
+    options: {
+      all: { type: "boolean" },
+      here: { type: "boolean" },
+      active: { type: "boolean" },
+      engine: { type: "string" },
+    },
+  });
+  if (values.all && values.here) throw new Error("--all 与 --here 不能同时使用");
+  const engine = values.engine;
+  if (engine !== undefined && engine !== "pi" && engine !== "qoder") {
+    throw new Error(`--engine 只能是 pi 或 qoder：${engine}`);
+  }
+
+  const all = listRecords();
+  // 解析符号链接后取目录的 Git 身份（同一仓库的所有 worktree 共享 common，子模块/独立仓库各异）；按目录缓存，避免逐条记录重复调用 git
+  const identityCache = new Map<string, DirIdentity>();
+  const identityOf = (dir: string): DirIdentity => {
+    const real = realDir(dir);
+    let entry = identityCache.get(real);
+    if (entry === undefined) {
+      entry = { real, git: projectIdentity(real) };
+      identityCache.set(real, entry);
+    }
+    return entry;
+  };
+  // 默认按当前项目过滤；--all 关闭过滤
+  const current = values.all ? undefined : identityOf(process.cwd());
+  const scoped = all.filter((record) => {
+    if (current !== undefined && !sameProject(identityOf(record.worktree?.repo ?? record.cwd), current)) return false;
+    if (engine !== undefined && (record.engine ?? "pi") !== engine) return false;
+    return true;
+  });
+  const rows = scoped.map((record) => {
     const held = lockHolder(record.name) !== undefined;
     const status = !held ? "idle" : existsSync(runPath(record.name, "sock")) ? "daemon" : "running";
+    return { record, status };
+  });
+  const visible = values.active ? rows.filter((row) => row.status !== "idle") : rows;
+
+  if (visible.length === 0) {
+    if (all.length === 0) {
+      print("（没有会话）");
+    } else if (scoped.length === 0) {
+      const tips: string[] = [];
+      if (current !== undefined) tips.push("--all 看全部项目");
+      if (engine !== undefined) tips.push(`去掉 --engine ${engine} 看其他引擎`);
+      print(`（当前范围没有会话，全部 ${all.length} 个${tips.length > 0 ? `；试试 ${tips.join("，")}` : ""}）`);
+    } else {
+      print(`（当前范围有 ${scoped.length} 个会话，但都不活跃；去掉 --active 查看）`);
+    }
+    return 0;
+  }
+  for (const { record, status } of visible) {
     const worktree = record.worktree ? [`${record.worktree.branch}@${record.worktree.base.slice(0, 12)}`] : [];
     print([record.name, status, record.updatedAt, record.cwd, sessionIdOf(record), ...worktree].join("\t"));
   }

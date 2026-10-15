@@ -24,7 +24,7 @@ description: 通过 pi-bridge 命令把任务交给 pi 或 qoderclicn coding age
 | `pi-bridge send <会话名> [--role advisor\|editor\|executor] [--engine pi\|qoder] [--cwd <目录>] [--model <模型>] [--thinking <等级>] [--worktree] <消息\|->` | 发送一条消息并等待回复；会话不存在时创建 |
 | `pi-bridge review [--engine pi\|qoder] [--staged \| --base <分支>] [--cwd <目录>] [--focus <关注点>] [--model <模型>] [--thinking <等级>]` | 以只读方式评审当前改动，见“让 pi 评审” |
 | `pi-bridge watch <会话名>` | 跟随该会话正在进行的运行 |
-| `pi-bridge list` | 列出会话：名字、状态（idle / running / daemon）、更新时间、目录、session-id；worktree 会话另附 `分支@base` |
+| `pi-bridge list [--all \| --here] [--active] [--engine pi\|qoder]` | 列出会话：名字、状态（idle / running / daemon）、更新时间、目录、session-id；worktree 会话另附 `分支@base`。默认只列当前项目（git 主仓库根；worktree 会话与主仓库算同一项目），`--all` 列全部项目，`--active` 只列 running/daemon，`--engine` 按引擎过滤 |
 | `pi-bridge rm <会话名> [--force]` | 删除会话记录与 worktree（分支保留）；有常驻进程时先停止它，正在执行的任务随之中止；pi 的会话文件保留 |
 | `pi-bridge steer <会话名> <消息\|->` | executor 任务中途插话：当前这轮工具执行完后送达，pi 据此调整 |
 | `pi-bridge answer <会话名> <提问 id> <回答\|->` / `--cancel` | 回答 pi 的提问，然后继续等待 |

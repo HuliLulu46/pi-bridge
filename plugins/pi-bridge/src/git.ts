@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync } from "node:fs";
+import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { WorktreeInfo } from "./store.ts";
 
@@ -26,6 +26,47 @@ function tryGit(cwd: string, args: string[]): string | undefined {
 /** 不在 git 仓库内时返回 undefined */
 export function repoRoot(cwd: string): string | undefined {
   return tryGit(cwd, ["rev-parse", "--show-toplevel"]);
+}
+
+export interface RepoIdentity {
+  /** 本工作区根；不在 git 仓库内时为 undefined */
+  toplevel?: string;
+  /** 共享 Git 目录：同一仓库的主工作区、子目录与所有 linked worktree（含 --separate-git-dir）都一致；子模块为其 .git/modules/<名>，必在祖先仓库 common 之下 */
+  common?: string;
+}
+
+/** 单个 rev-parse 字段：只去掉输出末尾的换行，保留路径内部的空白与换行 */
+function revParseField(cwd: string, flag: string): string | undefined {
+  const result = run(cwd, ["rev-parse", flag]);
+  if (!result.ok) return undefined;
+  return result.stdout.endsWith("\n") ? result.stdout.slice(0, -1) : result.stdout;
+}
+
+/** 解析符号链接使 .git 被软链到别处时身份仍可比；不存在时原样返回 */
+function realPathOrSelf(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+}
+
+/**
+ * 解析一个目录的 Git 身份，供 list 判定“同一项目”。
+ * 以 common（共享 Git 目录）识别仓库：它对普通仓库、子目录、内置/外置 linked worktree、--separate-git-dir 都一致，
+ * 且子模块的 common 必在祖先仓库 common 之下，因此“同一仓库或嵌套”可直接由 common 的包含关系判定，与各 worktree 的 toplevel 无关。
+ * 不依赖 worktree list（--separate-git-dir 下其首条是 Git 目录而非工作区）或 dirname(common)（子模块下错误）。
+ * 不在 git 仓库内时两个字段都为 undefined。
+ */
+export function projectIdentity(cwd: string): RepoIdentity {
+  const toplevel = revParseField(cwd, "--show-toplevel");
+  if (toplevel === undefined || toplevel === "") return {};
+  const commonDir = revParseField(cwd, "--git-common-dir");
+  // commonDir 以 -- 开头说明 git 过旧、把未知选项原样回显，此时不可信，退回仅用 toplevel。
+  // 经 resolve 归一后再解析符号链接：.git 被软链到别处时，主工作区与 linked worktree 报出的 common 才能一致
+  const common =
+    commonDir === undefined || commonDir === "" || commonDir.startsWith("--") ? undefined : realPathOrSelf(resolve(cwd, commonDir));
+  return { toplevel, common };
 }
 
 function headCommit(root: string): string | undefined {

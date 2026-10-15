@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 import { gitIn, initRepo, piCalls, run, setup } from "./helpers.ts";
 
@@ -45,6 +45,90 @@ test("send --worktree 创建 worktree 与分支，pi 在 worktree 中运行", ()
 
   assert.equal(run(["send", "w1", "again"]).code, 0);
   assert.equal(piCalls()[1]!.cwd, path);
+});
+
+test("list 从主仓库根、worktree 内、子目录内都看到同一主仓库的全部会话", () => {
+  assert.equal(run(["send", "w1", "--worktree", "hello"]).code, 0);
+  const sub = join(work, "sub");
+  mkdirSync(sub, { recursive: true });
+  assert.equal(run(["send", "s1", "--cwd", sub, "hello"]).code, 0);
+
+  const wt = worktreeOf("w1");
+  // worktree 会话归到主仓库，主仓库子目录会话也在同一身份下：三处都应同时看到 w1 与 s1
+  for (const cwd of [work, wt, sub]) {
+    const out = run(["list"], { cwd }).stdout;
+    assert.match(out, /^w1\t/m, `from ${cwd}`);
+    assert.match(out, /^s1\t/m, `from ${cwd}`);
+  }
+  // 都 idle 时 --active 为空，并提示去掉 --active
+  assert.match(run(["list", "--active"], { cwd: wt }).stdout, /都不活跃；去掉 --active/);
+});
+
+test("list 把绑定在外置 linked worktree 的会话归到主仓库，从主仓库或该 worktree 都能看到", () => {
+  const ext = join(dirname(work), `${basename(work)}-ext`);
+  gitIn(work, "worktree", "add", "-b", "feat-ext", ext, "HEAD");
+  const now = new Date().toISOString();
+  mkdirSync(join(home, "sessions"), { recursive: true });
+  writeFileSync(join(home, "sessions", "ext.json"), JSON.stringify({ name: "ext", cwd: ext, createdAt: now, updatedAt: now }));
+
+  // 记录侧也按主仓库归属：从外置 worktree 自身、从主仓库根都能看到 ext
+  assert.match(run(["list"], { cwd: ext }).stdout, /^ext\t/m);
+  assert.match(run(["list"], { cwd: work }).stdout, /^ext\t/m);
+});
+
+test("list 对 --separate-git-dir 仓库：主工作区与其 linked worktree 共享身份", () => {
+  const base = dirname(work);
+  const w = join(base, `${basename(work)}-sep`);
+  const gitDir = join(base, `${basename(work)}-sep.git`);
+  const wt = join(base, `${basename(work)}-sep-wt`);
+  gitIn(base, "init", "-q", `--separate-git-dir=${gitDir}`, w);
+  writeFileSync(join(w, "a.txt"), "a\n");
+  gitIn(w, "add", ".");
+  gitIn(w, "commit", "-q", "-m", "init");
+  gitIn(w, "worktree", "add", "-q", "-b", "feat", wt, "HEAD");
+
+  const now = new Date().toISOString();
+  mkdirSync(join(home, "sessions"), { recursive: true });
+  const wrec = (name: string, cwd: string): void =>
+    writeFileSync(join(home, "sessions", `${name}.json`), JSON.stringify({ name, cwd, createdAt: now, updatedAt: now }));
+  wrec("main-sess", w);
+  wrec("wt-sess", wt);
+
+  // worktree list 首条此时是 git 目录而非工作区，靠共享 git-common-dir 归一：两处都看到两个会话
+  for (const cwd of [w, wt]) {
+    const out = run(["list"], { cwd }).stdout;
+    assert.match(out, /^main-sess\t/m, `from ${cwd}`);
+    assert.match(out, /^wt-sess\t/m, `from ${cwd}`);
+  }
+});
+
+test("list 对子模块：从子模块只列自身，从父仓库按子树纳入", () => {
+  const base = dirname(work);
+  const donor = join(base, `${basename(work)}-donor`);
+  mkdirSync(donor, { recursive: true });
+  gitIn(donor, "init", "-q", "-b", "main");
+  writeFileSync(join(donor, "d.txt"), "d\n");
+  gitIn(donor, "add", ".");
+  gitIn(donor, "commit", "-q", "-m", "d");
+  gitIn(work, "-c", "protocol.file.allow=always", "submodule", "add", "-q", donor, "sub");
+  gitIn(work, "commit", "-q", "-m", "add sub");
+  const sub = join(work, "sub");
+
+  const now = new Date().toISOString();
+  mkdirSync(join(home, "sessions"), { recursive: true });
+  const wrec = (name: string, cwd: string): void =>
+    writeFileSync(join(home, "sessions", `${name}.json`), JSON.stringify({ name, cwd, createdAt: now, updatedAt: now }));
+  wrec("parent-sess", work);
+  wrec("sub-sess", sub);
+
+  // 子模块是独立仓库身份：从子模块执行不反向拉入父仓库会话
+  const fromSub = run(["list"], { cwd: sub }).stdout;
+  assert.match(fromSub, /^sub-sess\t/m);
+  assert.doesNotMatch(fromSub, /^parent-sess\t/m);
+  // 从父仓库执行：子模块按子树单向纳入
+  const fromParent = run(["list"], { cwd: work }).stdout;
+  assert.match(fromParent, /^parent-sess\t/m);
+  assert.match(fromParent, /^sub-sess\t/m);
 });
 
 test("已存在的会话加 --worktree 报错", () => {

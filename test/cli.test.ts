@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { beforeEach, test } from "node:test";
@@ -226,4 +226,104 @@ test("含 id 字段的旧记录以该 id 作为 session-id", () => {
   const removed = run(["rm", "old"]);
   assert.equal(removed.code, 0);
   assert.ok(removed.stdout.includes(`这是旧格式会话，同名再 send 会新建会话，旧历史在 ${work} 执行 pi --session-id ${id} 打开`));
+});
+
+test("list 默认按当前项目过滤，--all 看全部，--here 等同默认", () => {
+  const now = new Date().toISOString();
+  mkdirSync(join(home, "sessions"), { recursive: true });
+  const write = (name: string, cwd: string): void =>
+    writeFileSync(join(home, "sessions", `${name}.json`), JSON.stringify({ name, cwd, createdAt: now, updatedAt: now }));
+  write("inwork", work);
+  write("elsewhere", home);
+
+  const here = run(["list"]);
+  assert.match(here.stdout, /^inwork\t/m);
+  assert.doesNotMatch(here.stdout, /^elsewhere\t/m);
+  assert.equal(run(["list", "--here"]).stdout, here.stdout);
+
+  const all = run(["list", "--all"]);
+  assert.match(all.stdout, /^inwork\t/m);
+  assert.match(all.stdout, /^elsewhere\t/m);
+
+  const fromHome = run(["list"], { cwd: home });
+  assert.match(fromHome.stdout, /^elsewhere\t/m);
+  assert.doesNotMatch(fromHome.stdout, /^inwork\t/m);
+
+  const conflict = run(["list", "--all", "--here"]);
+  assert.equal(conflict.code, 1);
+  assert.match(conflict.stderr, /--all 与 --here 不能同时使用/);
+});
+
+test("list 把 worktree 会话归到其主仓库，从主仓库根能看到并附 分支@base", () => {
+  const now = new Date().toISOString();
+  mkdirSync(join(home, "sessions"), { recursive: true });
+  const wt = join(work, ".pi-bridge", "worktrees", "w1");
+  mkdirSync(wt, { recursive: true });
+  writeFileSync(
+    join(home, "sessions", "w1.json"),
+    JSON.stringify({
+      name: "w1",
+      cwd: wt,
+      createdAt: now,
+      updatedAt: now,
+      worktree: { repo: work, branch: "pi/w1", base: "0".repeat(40) },
+    }),
+  );
+
+  // 会话 cwd 在 worktree 深处，但以 worktree.repo（主仓库）归属，从主仓库根即可命中
+  const fromRepo = run(["list"]);
+  assert.match(fromRepo.stdout, /^w1\tidle\t/m);
+  assert.ok(fromRepo.stdout.includes("pi/w1@000000000000"));
+  // 真实 worktree（git 共享仓库身份）下从 worktree 内也能命中，见 worktree.test.ts
+});
+
+test("list --engine 按引擎过滤，--active 只列活跃会话，空范围给出对应提示", () => {
+  const now = new Date().toISOString();
+  mkdirSync(join(home, "sessions"), { recursive: true });
+  const write = (name: string, extra: object = {}): void =>
+    writeFileSync(join(home, "sessions", `${name}.json`), JSON.stringify({ name, cwd: work, createdAt: now, updatedAt: now, ...extra }));
+  write("p1");
+  write("q1", { engine: "qoder" });
+
+  const onlyQoder = run(["list", "--engine", "qoder"]);
+  assert.match(onlyQoder.stdout, /^q1\t/m);
+  assert.doesNotMatch(onlyQoder.stdout, /^p1\t/m);
+
+  const onlyPi = run(["list", "--engine", "pi"]);
+  assert.match(onlyPi.stdout, /^p1\t/m);
+  assert.doesNotMatch(onlyPi.stdout, /^q1\t/m);
+
+  const bad = run(["list", "--engine", "nope"]);
+  assert.equal(bad.code, 1);
+  assert.match(bad.stderr, /--engine 只能是 pi 或 qoder/);
+
+  // 两个都是 idle：--active 过滤后为空
+  assert.equal(run(["list", "--active"]).stdout, "（当前范围有 2 个会话，但都不活跃；去掉 --active 查看）\n");
+  // 当前项目里没有会话（都在 work，却从 home 列）
+  assert.equal(run(["list"], { cwd: home }).stdout, "（当前范围没有会话，全部 2 个；试试 --all 看全部项目）\n");
+});
+
+test("list 项目范围解析符号链接、区分同前缀目录、接受 .. 开头的合法子目录名", () => {
+  const now = new Date().toISOString();
+  mkdirSync(join(home, "sessions"), { recursive: true });
+  const write = (name: string, cwd: string): void =>
+    writeFileSync(join(home, "sessions", `${name}.json`), JSON.stringify({ name, cwd, createdAt: now, updatedAt: now }));
+
+  // 子目录名以 .. 开头，仍是 work 的合法子目录，不应被当成越界
+  mkdirSync(join(work, "..cache"), { recursive: true });
+  write("cache", join(work, "..cache"));
+  // 与 work 同前缀的兄弟目录（work vs workX），不属于当前项目
+  const sibling = `${work}X`;
+  mkdirSync(sibling, { recursive: true });
+  write("sib", sibling);
+  // 指向 work 的符号链接别名下登记的会话：解析后应归到 work
+  const alias = join(home, "alias");
+  symlinkSync(work, alias);
+  mkdirSync(join(work, "nested"), { recursive: true });
+  write("aliased", join(alias, "nested"));
+
+  const out = run(["list"]).stdout; // 从 work 执行
+  assert.match(out, /^cache\t/m);
+  assert.match(out, /^aliased\t/m);
+  assert.doesNotMatch(out, /^sib\t/m);
 });
