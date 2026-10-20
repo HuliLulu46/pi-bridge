@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { beforeEach, test } from "node:test";
 import { CLI, env, initRepo, piCalls, qoderCalls, qoderSessionIdOf, run, setEnv, setup } from "./helpers.ts";
-import { createQoderRunTracker, isSessionIdConflict, nameToUuid } from "../plugins/pi-bridge/src/qoder.ts";
+import { createQoderRunTracker, isSessionIdConflict, nameToUuid, reasoningEffort } from "../plugins/pi-bridge/src/qoder.ts";
 
 let home: string;
 let work: string;
@@ -49,11 +49,25 @@ test("同一会话第二次 send 用 --resume 续接同一 UUID", () => {
   assert.equal(qoderSessionIdOf(b!.argv), nameToUuid("s1"));
 });
 
-test("--model 与 --thinking 透传给 qoderclicn", () => {
-  run(["send", "s1", "--model", "m1", "--thinking", "enabled", "hello"]);
+test("--model 透传、--thinking 映射为 qoderclicn 的 --reasoning-effort", () => {
+  run(["send", "s1", "--model", "m1", "--thinking", "high", "hello"]);
   const argv = qoderCalls()[0]!.argv;
   assert.deepEqual(argv.slice(argv.indexOf("--model"), argv.indexOf("--model") + 2), ["--model", "m1"]);
-  assert.deepEqual(argv.slice(argv.indexOf("--thinking"), argv.indexOf("--thinking") + 2), ["--thinking", "enabled"]);
+  assert.ok(!argv.includes("--thinking"));
+  assert.deepEqual(argv.slice(argv.indexOf("--reasoning-effort"), argv.indexOf("--reasoning-effort") + 2), [
+    "--reasoning-effort",
+    "high",
+  ]);
+});
+
+test("pi 独有的 thinking 等级映射：off→none、minimal→low，qoder 独有等级原样透传", () => {
+  assert.equal(reasoningEffort("off"), "none");
+  assert.equal(reasoningEffort("minimal"), "low");
+  assert.equal(reasoningEffort("medium"), "medium");
+  assert.equal(reasoningEffort("xhigh"), "xhigh");
+  assert.equal(reasoningEffort("max"), "max");
+  assert.equal(reasoningEffort("auto"), "auto");
+  assert.equal(reasoningEffort("ultracode"), "ultracode");
 });
 
 test("result 非 success 时返回非零并带上 subtype", () => {

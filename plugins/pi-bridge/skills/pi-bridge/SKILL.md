@@ -41,6 +41,7 @@ description: 通过 pi-bridge 命令把任务交给 pi 或 qoderclicn coding age
 - **qoder 引擎支持 advisor、editor 与 review**；executor（常驻进程、中途提问、跑命令）仍由 pi 承接。对 qoder 会话请求 `--role executor` 会报错；对 pi 会话请求 `--role editor` 也会报错（pi 侧改代码用 executor）。
 - qoder 的 advisor 同样只读：工具被限制为 Read/Grep/Glob，不加载外部 MCP，读操作免权限打断。它的疑问只写在最终回复里（不像 pi 的 executor 能中途提问），由主控在下一轮回答。
 - qoder 的 editor（`--role editor`）在只读三件套之外加 Edit/Write，可编辑会话工作目录内的文件；没有 Bash（不能跑命令、不能提交），不加载外部 MCP。目录内的编辑自动放行，目录外或需要确认的操作被自动拒绝并列在回复末尾。editor 是一次性运行（跑完即退出），没有常驻进程，因此也不支持 steer/answer/abort；用 `watch` 看进度。
+- `--thinking` 的取值是 pi 的等级（`off/minimal/low/medium/high/xhigh/max`）；qoder 引擎下自动映射为 qoderclicn 的 `--reasoning-effort`（`off`→`none`、`minimal`→`low`，其余同名），也可直接传 qoder 独有的 `auto`/`ultracode`。
 
 ## 调用方式
 

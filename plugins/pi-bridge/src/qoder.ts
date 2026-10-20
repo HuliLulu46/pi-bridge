@@ -38,6 +38,18 @@ export function qoderBin(): string {
 }
 
 /**
+ * pi 的 --thinking 等级（off/minimal/low/medium/high/xhigh/max）映射到 qoderclicn 的
+ * --reasoning-effort（qoderclicn 的 --thinking 是 auto/adaptive/enabled/disabled 开关模式，
+ * 等级传给它会报错）。同名等级直通；pi 独有的 off/minimal 就近映射；
+ * 其余取值（如 qoder 独有的 auto/ultracode）原样透传，由 qoderclicn 自己校验。
+ */
+export function reasoningEffort(thinking: string): string {
+  if (thinking === "off") return "none";
+  if (thinking === "minimal") return "low";
+  return thinking;
+}
+
+/**
  * 会话名 → 确定性 UUID。qoderclicn 的 --session-id 要求合法 UUID（pi 允许任意字符串），
  * 用 SHA-256 派生并置成 version 5 / variant 10xx 的形状，保证同名恒定、可跨进程 --resume。
  */
@@ -171,7 +183,7 @@ function qoderAttempt(opts: QoderRunOptions): Promise<RunResult> {
     "stream-json",
     ...sessionArgs,
     ...(opts.model ? ["--model", opts.model] : []),
-    ...(opts.thinking ? ["--thinking", opts.thinking] : []),
+    ...(opts.thinking ? ["--reasoning-effort", reasoningEffort(opts.thinking)] : []),
     ...(opts.systemPrompt ? ["--append-system-prompt", opts.systemPrompt] : []),
     // advisor 只读隔离：工具已被限制为只读三件套，没有写入/执行能力可绕过，因此放行权限确认
     // 能让读操作（含工作目录外的绝对路径）像 pi 的顾问一样免打断。
