@@ -1,6 +1,6 @@
 ---
 name: pi-bridge
-description: 通过 pi-bridge 命令把任务交给 pi 或 qoderclicn coding agent（被调用方引擎用 --engine 选择，缺省 pi）：以只读顾问身份做方案评审、方向判断、代码评审，或以执行者身份改代码（pi 的常驻进程，支持中途提问、任务中途插话或中止；qoder 的 editor 角色可编辑工作目录内的文件），按会话名多轮续接，可在 worktree 中隔离运行。当用户要求“让 pi 做 / 交给 pi / 问问 pi / 让 pi 评审 / 用 pi agent / 用 qoder 评审 / 让 qoder 改”，需要把任务委托给 pi 或 qoderclicn，或跨多个文件的改动在提交前需要第二意见时使用。
+description: 通过 pi-bridge 命令把任务交给 pi 或 qoderclicn coding agent（被调用方引擎缺省 pi，仅当用户明确要求 qoderclicn 时才用 --engine qoder；只要 Qoder 的模型则走 pi 的 --model qoder-local/<模型>）：以只读顾问身份做方案评审、方向判断、代码评审，或以执行者身份改代码（pi 的常驻进程，支持中途提问、任务中途插话或中止；qoder 的 editor 角色可编辑工作目录内的文件），按会话名多轮续接，可在 worktree 中隔离运行。当用户要求“让 pi 做 / 交给 pi / 问问 pi / 让 pi 评审 / 用 pi agent / 用 qoder 的模型评审 / 用 qoderclicn 评审 / 让 qoderclicn 改”，需要把任务委托给 pi 或 qoderclicn，或跨多个文件的改动在提交前需要第二意见时使用。
 ---
 
 # pi-bridge
@@ -31,9 +31,15 @@ description: 通过 pi-bridge 命令把任务交给 pi 或 qoderclicn coding age
 | `pi-bridge abort <会话名>` | 中止 executor 当前任务，会话保留 |
 | `pi-bridge stop <会话名>` | 停止常驻进程，正在执行的任务随之中止 |
 
-## 被调用方引擎：pi 或 qoder（两个都可用）
+## 被调用方引擎：缺省 pi，用户显式声明才用 qoder
 
-“第二个大脑”既可以是 pi，也可以是 qoderclicn，两者对主控的用法完全一致——同样在后台跑、读回复、逐条核实。用 `--engine` 选择：
+“第二个大脑”缺省是 pi。pi 已经接入 Qoder 的模型（provider 名 `qoder-local`，由本机 qoder2api 服务提供），所以“用 Qoder 的模型”不需要换引擎：
+
+- 用户要 Qoder 的模型（如“用 qoder 评审”“用 Qwen3.8-Max”）：仍走 pi，加 `--model qoder-local/<模型>`，例如 `--model qoder-local/Qwen3.8-Max`。可用模型用 `pi --list-models qoder` 查看；使用前 qoder2api 服务必须在运行。
+- **只有用户明确要求 qoderclicn（说出 qoderclicn / qoder CLI / qoder 引擎）时，才加 `--engine qoder`**。用户没提就一律走 pi，不要因为任务类型（如需要改代码）或自行判断而切到 qoderclicn。
+- 改代码的任务没有声明 qoderclicn 时，用 pi 的 `--role executor`，不用 `--role editor`。
+
+两者对主控的用法完全一致——同样在后台跑、读回复、逐条核实。用 `--engine` 选择：
 
 - `--engine pi`（缺省）走 pi；`--engine qoder` 走 qoderclicn。也可用环境变量 `PI_BRIDGE_ENGINE=pi|qoder` 设**新建会话**的缺省，`--engine` 优先于它。
 - 引擎在会话**首次创建时绑定**，之后续接以绑定为准；对已存在的会话显式传入不同的 `--engine` 会报错。要换引擎就换一个会话名。

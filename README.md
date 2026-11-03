@@ -80,10 +80,17 @@ Claude 能根据你的意图回答的直接回答，拿不准的再问你；`pi-
 - Node.js 22.18 或更高（直接运行 `.ts` 源码，依赖 Node 的类型擦除）
 - 已安装 `pi`，且在 PATH 中
 - 用 `--engine qoder` 时，另需已安装 `qoderclicn`（或用 `QODER_BIN` 指定其路径）
+- 用 `--model qoder-local/<模型>` 让 pi 调 Qoder 的模型时，另需本机 qoder2api 服务在运行，并在 `~/.pi/agent/models.json` 配好 `qoder-local` provider
 
-## 被调用方引擎：pi 或 qoderclicn（两个都可用）
+## 被调用方引擎：缺省 pi，显式声明才用 qoderclicn
 
-被调用方（“第二个大脑”）既可以是 pi，也可以是 [Qoder CLI（qoderclicn）](https://docs.qoder.cn/cli)，用 `--engine` 选择，缺省 `pi`：
+被调用方（“第二个大脑”）缺省是 pi。pi 已接入 Qoder 的模型，只要 Qoder 的模型能力时仍走 pi：
+
+```bash
+pi-bridge send design-review --model qoder-local/Qwen3.8-Max "只读评审这份方案，指出风险最高的三处"
+```
+
+只有明确要用 [Qoder CLI（qoderclicn）](https://docs.qoder.cn/cli) 这个独立 agent 时，才用 `--engine qoder`：
 
 ```bash
 pi-bridge send design-review --engine qoder "只读评审这份方案，指出风险最高的三处"
