@@ -16,7 +16,9 @@ if (argv[argv.indexOf("--mode") + 1] === "rpc") {
     writeFileSync(`${process.env.FAKE_PI_CALLS}.patch.json`, JSON.stringify(patch));
   }
   const emit = (event) => process.stdout.write(JSON.stringify(event) + "\n");
-  const assistant = (extra) => emit({ type: "message_end", message: { role: "assistant", ...extra } });
+  // FAKE_PI_MODEL 打开时，assistant 消息像真 pi 一样带上实际的模型与思考等级
+const modelInfo = process.env.FAKE_PI_MODEL ? { provider: "fake", model: process.env.FAKE_PI_MODEL, thinkingLevel: "low" } : {};
+  const assistant = (extra) => emit({ type: "message_end", message: { role: "assistant", ...modelInfo, ...extra } });
 
   if (message === "fail") {
     process.stderr.write("Error: boom\n");

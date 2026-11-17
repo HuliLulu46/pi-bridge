@@ -31,6 +31,19 @@ description: 通过 pi-bridge 命令把任务交给 pi 或 qoderclicn coding age
 | `pi-bridge abort <会话名>` | 中止 executor 当前任务，会话保留 |
 | `pi-bridge stop <会话名>` | 停止常驻进程，正在执行的任务随之中止 |
 
+## 机器可读接口（供 mod、脚本；人用文本模式即可）
+
+- `send`、`answer`、`review`、`list` 加 `--json`：输出 JSON，退出码不变（0 成功，1 失败，2 有待回答的提问）；运行之外的错误也是一行 `{"status":"error","error":...}`。
+- `send`、`answer`、`review` 加 `--detach`（隐含 `--json`）：立即返回 `{"session","runId","status"}`，任务在后台继续。运行记录写出之后才返回，所以随后的 `result` 一定查得到；会话被占用等失败直接报错，不会假装开始。
+- `pi-bridge result <runId>`：一次运行的完整记录（状态、完整回复、待回答的提问），在 `~/.pi-bridge/runs/<runId>.json`，保留 14 天（`PI_BRIDGE_RUN_KEEP_DAYS` 调整）。
+- 全局事件日志 `~/.pi-bridge/events.ndjson`：每行一个事件 `{ts, session, runId, type, text?, ask?}`，type 为 start / tool / tool-error / retry / steer / ask / answered / ask-timeout / confirm-denied / done / failed；不含回复正文，正文按 runId 取。超过 4 MB 轮转为 `.1`（`PI_BRIDGE_EVENTS_MAX_BYTES` 调整）：读者记字节偏移，偏移超出文件大小就从头读。`pi-bridge events [--since <偏移>] [--follow]` 读取它。
+- `list --json` 的每个会话带 `lastRun`（最近一次运行的 `runId`、`status`、`startedAt`、`endedAt`，失败时附截短的 `error`）：会话的 `status` 只说进程是否在跑，idle 不代表上次成功。
+- 运行记录里 `status` 为 running 但会话已不持锁（`list` 显示 idle）说明运行异常中断。
+- 主会话归属（`--owner <主会话 id>`，PiAgent mod 用；不带时行为不变）：会话记录里的 `owner` 是它所属的主会话，无主的会话被第一个带 `--owner` 派发的主会话认领。同名会话属于别的主会话时，`send` 自动分出本主会话的副本 `<会话名>.<id 前 6 位>`（复制当时的全部上下文，`forkOf` 记来源），之后同名都进副本，两边不再互相叠加；对方正在运行或会话带 worktree 时拒绝。`steer`、`answer`、`abort`、`stop` 只能作用于本主会话的会话或副本。`list --json` 带 `owner`、`forkOf`。
+- 委托方的系统提示（行为对齐原生 subagent：结论先行、如实汇报、不扩大范围、advisor 不反问）在 `src/prompts.ts`。
+
+Claude Code 里可用本仓库之外的 `pi` mod（`PiAgent` 工具）封装这套接口：后台派发、完成时自动唤醒、pi 提问走原生对话框。
+
 ## 被调用方引擎：缺省 pi，用户显式声明才用 qoder
 
 “第二个大脑”缺省是 pi。pi 已经接入 Qoder 的模型（provider 名 `qoder-local`，由本机 qoder2api 服务提供），所以“用 Qoder 的模型”不需要换引擎：

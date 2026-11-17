@@ -24,6 +24,10 @@ export interface SessionRecord {
   createdAt: string;
   updatedAt: string;
   worktree?: WorktreeInfo;
+  /** 归属的主会话（调用方用 --owner 传入，如 PiAgent mod 传 Claude 会话 id）；缺省为无主，第一个带 --owner 派发的主会话认领 */
+  owner?: string;
+  /** 从哪个会话分出的副本：同名会话属于别的主会话时，后来者在副本上续接，不与原会话共用上下文 */
+  forkOf?: string;
 }
 
 /** 与 pi 的 session-id 规则一致 */

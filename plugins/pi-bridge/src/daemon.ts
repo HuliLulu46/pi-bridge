@@ -6,6 +6,8 @@ import { createLineSplitter, createRunTracker, parseEvent, preview, toolNotice, 
 import { trackChanges } from "./git.ts";
 import { modelArgs, PI_ENV, piBin } from "./pi.ts";
 import { DONE, FAILED, formatAsk, type Ask, type AskMethod, type ClientRequest, type DaemonMessage } from "./protocol.ts";
+import { appendEvent, eventFromProgress, newRunId, pruneRuns, writeRun, type RunRecord } from "./runs.ts";
+import { subagentPrompt } from "./prompts.ts";
 import { acquireLock, logPath, readRecord, runPath, sessionIdOf, writeRecord } from "./store.ts";
 
 export interface DaemonOptions {
@@ -19,8 +21,7 @@ export interface DaemonOptions {
 const ASK_TIMEOUT_MS = Number(process.env.PI_BRIDGE_ASK_TIMEOUT_MS ?? 10 * 60_000);
 const IDLE_EXIT_MS = Number(process.env.PI_BRIDGE_IDLE_MS ?? 30 * 60_000);
 const STOP_GRACE_MS = 5000;
-const SYSTEM_PROMPT =
-  "你由 Claude Code 通过 pi-bridge 调用，对话另一端是 Claude 而不是人。需要澄清或做选择时，使用 question 工具提问。";
+const SYSTEM_PROMPT = subagentPrompt("executor");
 const DIALOG_METHODS = new Set<string>(["select", "confirm", "input", "editor"]);
 
 const [name, optionsJson] = process.argv.slice(2) as [string, string];
@@ -71,6 +72,8 @@ const pi = spawn(
 );
 
 let busy = false;
+/** 当前（或上一次）运行的记录，写进 ~/.pi-bridge/runs/<runId>.json */
+let run: RunRecord | undefined;
 let tracker = createRunTracker(emit);
 let finishChanges = (): string => "";
 let runLines: string[] = [];
@@ -98,9 +101,30 @@ function notifyWaiters(message: DaemonMessage): void {
   waiters.clear();
 }
 
+function updateRun(patch: Partial<RunRecord>): void {
+  if (!run) return;
+  run = { ...run, ...patch };
+  writeRun(run);
+}
+
+/** 运行记录里的状态跟着待回答的提问走：还有提问未答就是 asking，否则回到 running */
+function syncAskState(): void {
+  const first = pending.values().next().value;
+  if (first) {
+    const { timer: _timer, ...ask } = first;
+    updateRun({ status: "asking", ask, exitCode: 2 });
+  } else {
+    updateRun({ status: "running", ask: undefined, exitCode: undefined });
+  }
+}
+
 function emit(line: string): void {
   runLines.push(line);
   appendFileSync(log, `${line}\n`);
+  if (run) {
+    const event = eventFromProgress(name, run.runId, line);
+    if (event) appendEvent(event);
+  }
   for (const socket of watchers) send(socket, { type: "line", line }, false);
 }
 
@@ -126,6 +150,19 @@ function startRun(message: string): void {
   finishChanges = trackChanges(record.cwd);
   runLines = [];
   denied = [];
+  run = {
+    runId: newRunId(),
+    session: name,
+    role: "executor",
+    engine: record.engine ?? "pi",
+    cwd: record.cwd,
+    status: "running",
+    startedAt: new Date().toISOString(),
+    message: preview(message),
+  };
+  pruneRuns();
+  writeRun(run);
+  appendEvent({ session: name, runId: run.runId, type: "start", text: message });
   writeFileSync(log, "");
   for (const [socket, timer] of awaitingStart) {
     clearTimeout(timer);
@@ -140,16 +177,23 @@ function endRun(ok: boolean, text: string, error: string): void {
   for (const ask of pending.values()) clearTimeout(ask.timer);
   pending.clear();
   writeRecord({ ...record, updatedAt: new Date().toISOString() });
+  const runId = run?.runId;
+  const endedAt = new Date().toISOString();
+  // 先落运行记录与事件，再通知等待者：任何人收到完成通知后读记录都读得到
   if (ok) {
+    updateRun({ status: "done", endedAt, reply: text, exitCode: 0, ask: undefined });
+    if (runId) appendEvent({ session: name, runId, type: "done" });
     emit("[reply]");
     emit(text);
     emit(DONE);
-    notifyWaiters({ type: "done", text });
+    notifyWaiters({ type: "done", text, runId });
   } else {
+    updateRun({ status: "failed", endedAt, reply: text, error, exitCode: 1, ask: undefined });
+    if (runId) appendEvent({ session: name, runId, type: "failed", text: error });
     emit("[error]");
     emit(error);
     emit(FAILED);
-    notifyWaiters({ type: "failed", error, text });
+    notifyWaiters({ type: "failed", error, text, runId });
   }
   for (const socket of watchers) socket.end();
   watchers.clear();
@@ -184,11 +228,14 @@ function onDialog(event: PiEvent): void {
   const timer = setTimeout(() => {
     pending.delete(ask.id);
     respondDialog(ask.id, { cancelled: true });
+    syncAskState();
     emit(`[ask-timeout] ${ask.id}`);
   }, ASK_TIMEOUT_MS);
   pending.set(ask.id, { ...ask, timer });
+  syncAskState();
+  if (run) appendEvent({ session: name, runId: run.runId, type: "ask", text: `${ask.title}`, ask });
   emit(formatAsk(name, ask));
-  notifyWaiters({ type: "ask", ask });
+  notifyWaiters({ type: "ask", ask, runId: run?.runId });
 }
 
 function onPiEvent(event: PiEvent): void {
@@ -228,7 +275,12 @@ async function handleRequest(socket: Socket, req: ClientRequest): Promise<void> 
     case "prompt": {
       if (busy) throw new Error(`会话 ${name} 正在运行任务，补充指示用 steer（当前这轮工具执行完后送达）`);
       startRun(req.message);
-      waiters.add(socket);
+      if (req.detach) {
+        send(socket, { type: "started", runId: run!.runId });
+      } else {
+        send(socket, { type: "started", runId: run!.runId }, false);
+        waiters.add(socket);
+      }
       const response = await piCommand({ type: "prompt", message: req.message });
       if (!response.success) endRun(false, "", `pi 拒绝了这条消息：${response.error}`);
       return;
@@ -247,8 +299,10 @@ async function handleRequest(socket: Socket, req: ClientRequest): Promise<void> 
       const response = req.cancelled ? { cancelled: true } : answerResponse(ask, req.value ?? "");
       clearTimeout(ask.timer);
       pending.delete(req.id);
+      syncAskState();
       emit(`[answered] ${req.id} ${preview(response)}`);
-      waiters.add(socket);
+      if (req.detach) send(socket, { type: "ok", text: "已回答" });
+      else waiters.add(socket);
       respondDialog(req.id, response);
       return;
     }

@@ -8,6 +8,10 @@ export interface PiMessage {
   content?: ContentBlock[] | string;
   stopReason?: string;
   errorMessage?: string;
+  /** 本条回复实际用的模型与思考等级，pi 在 assistant 消息里带上 */
+  provider?: string;
+  model?: string;
+  thinkingLevel?: string;
 }
 
 /** pi 在 stdout 上输出的记录：会话事件、RPC 命令响应、扩展 UI 请求 */
@@ -88,6 +92,7 @@ export function createRunTracker(onProgress: (line: string) => void) {
   let settled = false;
   const replies: string[] = [];
   const failedTools: string[] = [];
+  let modelReported = false;
 
   return {
     handle(event: PiEvent): void {
@@ -95,6 +100,12 @@ export function createRunTracker(onProgress: (line: string) => void) {
         case "message_end": {
           if (event.message?.role !== "assistant") break;
           lastAssistant = event.message;
+          // 每次运行上报一次实际的模型与思考等级，界面据此显示
+          if (!modelReported && lastAssistant.model) {
+            modelReported = true;
+            const name = lastAssistant.provider ? `${lastAssistant.provider}/${lastAssistant.model}` : lastAssistant.model;
+            onProgress(`[model] ${name}${lastAssistant.thinkingLevel ? ` ${lastAssistant.thinkingLevel}` : ""}`);
+          }
           const text = textOf(lastAssistant.content).trim();
           if (lastAssistant.stopReason === "stop" && text) replies.push(text);
           break;

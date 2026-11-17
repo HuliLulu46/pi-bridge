@@ -1,5 +1,6 @@
 import type { RunResult } from "./events.ts";
 import { ADVISOR_ARGS, modelArgs, runPi } from "./pi.ts";
+import { subagentPrompt } from "./prompts.ts";
 import { nameToUuid, runQoder, type PrintRole } from "./qoder.ts";
 
 export type Engine = "pi" | "qoder";
@@ -43,6 +44,7 @@ export function runAdvisor(opts: AdvisorRunOptions): Promise<RunResult> {
       message: opts.message,
       isNew: opts.isNew,
       role: opts.role,
+      systemPrompt: subagentPrompt(opts.role),
       model: opts.model,
       thinking: opts.thinking,
       onStarted: opts.onStarted,
@@ -53,7 +55,7 @@ export function runAdvisor(opts: AdvisorRunOptions): Promise<RunResult> {
     sessionId: opts.sessionId,
     cwd: opts.cwd,
     message: opts.message,
-    piArgs: [...(opts.isNew ? ["--name", opts.sessionName] : []), ...ADVISOR_ARGS, ...modelArgs(opts.model, opts.thinking)],
+    piArgs: [...(opts.isNew ? ["--name", opts.sessionName] : []), ...ADVISOR_ARGS, "--append-system-prompt", subagentPrompt("advisor"), ...modelArgs(opts.model, opts.thinking)],
     onProgress: opts.onProgress,
   });
 }

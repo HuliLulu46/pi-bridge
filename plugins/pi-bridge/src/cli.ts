@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { appendFileSync, closeSync, existsSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import type { Socket } from "node:net";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -12,7 +12,21 @@ import { createWorktree, projectIdentity, removeWorktree, rollbackError, type Re
 import type { Role } from "./pi.ts";
 import type { PrintRole } from "./qoder.ts";
 import { nameToUuid } from "./qoder.ts";
+import { forkPiSession } from "./fork.ts";
 import { prepareReview } from "./review.ts";
+import {
+  appendEvent,
+  assertRunId,
+  eventFromProgress,
+  latestRunsBySession,
+  newRunId,
+  pruneRuns,
+  readEvents,
+  readRun,
+  runsDir,
+  writeRun,
+  type RunRecord,
+} from "./runs.ts";
 import { DONE, FAILED, formatAsk, openDaemon, request, type ClientRequest, type DaemonMessage } from "./protocol.ts";
 import {
   acquireLock,
@@ -32,9 +46,15 @@ import {
 const USAGE = `用法：
   pi-bridge send <会话名> [--role advisor|editor|executor] [--engine pi|qoder] [--cwd <目录>] [--model <模型>] [--thinking <等级>] [--worktree] <消息|->
   pi-bridge watch <会话名>
-  pi-bridge list [--all | --here] [--active] [--engine pi|qoder]
+  pi-bridge list [--all | --here] [--active] [--engine pi|qoder] [--json]
   pi-bridge rm <会话名> [--force]
   pi-bridge review [--engine pi|qoder] [--staged | --base <分支>] [--cwd <目录>] [--focus <关注点>] [--model <模型>] [--thinking <等级>]
+  pi-bridge result <运行编号>
+  pi-bridge events [--since <字节偏移>] [--follow]
+
+机器可读：send / answer / review / list 加 --json 输出 JSON（退出码不变：0 成功，1 失败，2 有待回答的提问）；
+send / answer / review 加 --detach 立即返回 {"session","runId"}（隐含 --json），任务在后台继续，
+结果用 result <运行编号> 取，状态变化追加在 ~/.pi-bridge/events.ndjson，events 命令读取它。
 
 常驻进程（executor 会话的任务中途干预、回答 pi 的提问）：
   pi-bridge steer <会话名> <消息|->
@@ -42,6 +62,10 @@ const USAGE = `用法：
   pi-bridge answer <会话名> <提问 id> --cancel
   pi-bridge abort <会话名>
   pi-bridge stop <会话名>
+
+主会话归属（供 PiAgent mod 等调用方使用）：send、review、steer、answer、abort、stop 可加 --owner <主会话 id>。
+同名会话属于别的主会话时：send 自动分出本主会话的副本（<会话名>.<id 前 6 位>）在副本上续接，之后同名都进副本；
+对方正在运行或会话带 worktree 时拒绝；steer、answer、abort、stop 只作用于本主会话的会话或副本。steer、abort、stop 加 --json 输出一行 JSON
 
 消息写 - 时从 stdin 读取。首次 send 创建会话并绑定 cwd（默认当前目录），之后固定在该目录运行。
 --role 缺省为 advisor：只读，跑完即退出。editor 仅 qoder 引擎可用：可编辑工作目录内的文件（Edit/Write，无 Bash），同样跑完即退出。
@@ -61,9 +85,30 @@ const DAEMON_STOP_TIMEOUT_MS = 10_000;
 /** macOS 的 unix socket 路径上限为 104 字节 */
 const SOCKET_PATH_MAX = 103;
 const DAEMON_ENTRY = fileURLToPath(new URL("./daemon.ts", import.meta.url));
+const CLI_ENTRY = fileURLToPath(import.meta.url);
+/** detach 后等后台进程写出运行记录的时限 */
+const DETACH_READY_TIMEOUT_MS = 60_000;
 
 function print(text: string): void {
   process.stdout.write(`${text}\n`);
+}
+
+function printJson(value: unknown): void {
+  print(JSON.stringify(value));
+}
+
+/** list --json 里会话最近一次运行的摘要：状态、时间、失败原因（截短），全文用 result 取 */
+function lastRunOf(run: RunRecord | undefined): { lastRun?: Record<string, unknown> } {
+  if (run === undefined) return {};
+  return {
+    lastRun: {
+      runId: run.runId,
+      status: run.status,
+      startedAt: run.startedAt,
+      ...(run.endedAt ? { endedAt: run.endedAt } : {}),
+      ...(run.error ? { error: run.error.slice(0, 200) } : {}),
+    },
+  };
 }
 
 async function readStdin(): Promise<string> {
@@ -86,6 +131,7 @@ function ensureRecord(
   worktree: boolean,
   engine: Engine,
   engineExplicit: boolean,
+  owner?: string,
 ): { record: SessionRecord; isNew: boolean } {
   const existing = readRecord(name);
   if (existing && worktree) throw new Error(`会话 ${name} 已存在，worktree 只能在创建会话时指定`);
@@ -101,7 +147,7 @@ function ensureRecord(
   }
   if (!existsSync(cwd)) throw new Error(`目录不存在：${cwd}`);
   const now = new Date().toISOString();
-  const base = { name, engine, createdAt: now, updatedAt: now };
+  const base = { name, engine, createdAt: now, updatedAt: now, ...(owner !== undefined ? { owner } : {}) };
   if (!worktree) {
     const record = { ...base, cwd };
     writeRecord(record);
@@ -124,16 +170,22 @@ async function requireDaemon(name: string): Promise<Socket> {
 }
 
 /** 等到 pi 提问或本次运行结束 */
-async function awaitRun(name: string, stream: AsyncGenerator<DaemonMessage>): Promise<number> {
+async function awaitRun(name: string, stream: AsyncGenerator<DaemonMessage>, json = false): Promise<number> {
   for await (const message of stream) {
     switch (message.type) {
       case "ask":
-        print(formatAsk(name, message.ask));
+        if (json) printJson({ status: "asking", session: name, runId: message.runId, ask: message.ask });
+        else print(formatAsk(name, message.ask));
         return EXIT_ASK;
       case "done":
-        print(message.text);
+        if (json) printJson({ status: "done", session: name, runId: message.runId, reply: message.text });
+        else print(message.text);
         return 0;
       case "failed":
+        if (json) {
+          printJson({ status: "failed", session: name, runId: message.runId, error: message.error, reply: message.text });
+          return 1;
+        }
         if (message.text) print(message.text);
         throw new Error(message.error);
       case "error":
@@ -151,6 +203,68 @@ async function simpleRequest(name: string, req: ClientRequest): Promise<string> 
   throw new Error("与常驻进程的连接中断");
 }
 
+type OwnerOp = "send" | "steer" | "answer" | "abort" | "stop";
+
+/** 副本名后缀：主会话 id 去掉非字母数字后的前 6 位 */
+function ownerTag(owner: string): string {
+  const tag = owner.replace(/[^A-Za-z0-9]/g, "").slice(0, 6);
+  if (tag === "") throw new Error(`--owner 需要字母或数字：${owner}`);
+  return tag;
+}
+
+/**
+ * 带 --owner（主会话 id）时，决定实际作用的会话：
+ * - 会话不存在、无主或属于这个主会话：就用它（send 时无主的记到这个主会话名下）
+ * - 属于别的主会话：本主会话从它分出过副本就用副本；send 时没有副本就分一份（qoder 不分，照常共用）
+ * - 别的主会话的会话正在运行、带 worktree，或 steer/answer/abort/stop 而没有副本：拒绝
+ */
+function resolveOwned(name: string, owner: string | undefined, op: OwnerOp): string {
+  if (owner === undefined) return name;
+  const record = readRecord(name);
+  if (!record) return name;
+  if (record.owner === undefined) {
+    // 正在跑（旧版调用方派发的、或终端里直接跑的）先不认领，免得真正在用它的一方之后被分到副本
+    if (op === "send" && !isBusy(name)) writeRecord({ ...record, owner });
+    return name;
+  }
+  if (record.owner === owner || (record.engine ?? "pi") === "qoder") return name;
+  const mine = listRecords().find((r) => r.forkOf === name && r.owner === owner);
+  if (mine) return mine.name;
+  if (op !== "send") throw new Error(`会话 ${name} 属于另一个主会话，不能 ${op}`);
+  if (record.worktree) throw new Error(`会话 ${name} 属于另一个主会话且带 worktree，不能分出副本；请换一个新会话名`);
+  const running = isBusy(name);
+  if (running) {
+    throw new Error(`会话 ${name} 属于另一个主会话，正在运行任务（${running}）；等它结束后再派发会自动分出本主会话的副本，或换一个新会话名`);
+  }
+  const fork = `${name}.${ownerTag(owner)}`;
+  assertName(fork);
+  if (readRecord(fork)) throw new Error(`副本名 ${fork} 已被别的会话占用；请换一个新会话名`);
+  forkPiSession(sessionIdOf(record), fork, record.cwd);
+  const now = new Date().toISOString();
+  writeRecord({ name: fork, cwd: record.cwd, engine: "pi", createdAt: now, updatedAt: now, owner, forkOf: name });
+  return fork;
+}
+
+/** 有任务在跑：持锁且最近一次运行是 running/asking，返回它的 runId。常驻进程空闲时也持锁，不算 */
+function isBusy(name: string): string | undefined {
+  if (lockHolder(name) === undefined) return undefined;
+  const latest = latestRunsBySession().get(name);
+  return latest?.status === "running" || latest?.status === "asking" ? latest.runId : undefined;
+}
+
+/** steer、abort、stop 的参数：只取 --owner 与 --json，其余原样作为位置参数（消息可能以 - 开头） */
+function takeFlags(argv: string[]): { owner?: string; json: boolean; rest: string[] } {
+  const rest: string[] = [];
+  let owner: string | undefined;
+  let json = false;
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === "--owner") owner = argv[++i];
+    else if (argv[i] === "--json") json = true;
+    else rest.push(argv[i]!);
+  }
+  return { owner, json, rest };
+}
+
 interface SendOptions {
   cwd?: string;
   model?: string;
@@ -158,6 +272,12 @@ interface SendOptions {
   worktree: boolean;
   engine: Engine;
   engineExplicit: boolean;
+  /** 以 JSON 输出结果 */
+  json: boolean;
+  /** 立即返回运行编号，任务在后台继续（隐含 json） */
+  detach: boolean;
+  /** 归属的主会话，新建会话时记入记录 */
+  owner?: string;
 }
 
 async function send(argv: string[]): Promise<number> {
@@ -172,16 +292,22 @@ async function send(argv: string[]): Promise<number> {
       model: { type: "string" },
       thinking: { type: "string" },
       worktree: { type: "boolean" },
+      json: { type: "boolean" },
+      detach: { type: "boolean" },
+      owner: { type: "string" },
     },
   });
-  const [name, raw] = positionals;
-  assertName(name);
+  const [requested, raw] = positionals;
+  assertName(requested);
   if (positionals.length !== 2) throw new Error("需要恰好一条消息，含空格时请加引号，或用 - 从 stdin 读取");
   const role = values.role as Role;
   if (role !== "advisor" && role !== "editor" && role !== "executor") {
     throw new Error(`--role 只能是 advisor、editor 或 executor：${role}`);
   }
   const engine = resolveEngine(values.engine);
+  const owner = values.owner;
+  // 属于别的主会话时改用（必要时分出）本主会话的副本
+  const name = resolveOwned(requested, owner, "send");
   // 会话已存在（含没有 engine 字段的旧记录，实际由 pi 承接）以记录为准，否则以本次解析出的引擎为准
   const existing = readRecord(name);
   const effectiveEngine = existing ? existing.engine ?? "pi" : engine;
@@ -201,7 +327,28 @@ async function send(argv: string[]): Promise<number> {
     worktree: values.worktree ?? false,
     engine,
     engineExplicit: values.engine !== undefined,
+    json: (values.json ?? false) || (values.detach ?? false),
+    detach: values.detach ?? false,
+    owner,
   };
+  if (opts.detach && role !== "executor") {
+    // 后台子进程自己拿会话锁、跑完整个 send；这里只负责等它写出运行记录
+    const args = [
+      "send",
+      name,
+      "--role",
+      role,
+      ...(values.engine ? ["--engine", values.engine] : []),
+      ...(values.cwd ? ["--cwd", resolve(values.cwd)] : []),
+      ...(values.model ? ["--model", values.model] : []),
+      ...(values.thinking ? ["--thinking", values.thinking] : []),
+      ...(opts.worktree ? ["--worktree"] : []),
+      ...(owner !== undefined ? ["--owner", owner] : []),
+      "--json",
+      "-",
+    ];
+    return detachChild(args, message);
+  }
   return role === "executor" ? sendExecutor(name, message, opts) : sendPrint(name, message, role, opts);
 }
 
@@ -213,8 +360,8 @@ async function sendPrint(name: string, message: string, role: PrintRole, opts: S
   }
   const release = acquireLock(name);
   try {
-    const { record, isNew } = ensureRecord(name, opts.cwd, opts.worktree, opts.engine, opts.engineExplicit);
-    return await runPrint(record, isNew, message, { model: opts.model, thinking: opts.thinking, role });
+    const { record, isNew } = ensureRecord(name, opts.cwd, opts.worktree, opts.engine, opts.engineExplicit, opts.owner);
+    return await runPrint(record, isNew, message, { model: opts.model, thinking: opts.thinking, role, json: opts.json });
   } finally {
     release();
   }
@@ -225,6 +372,18 @@ interface PrintOptions {
   thinking?: string;
   /** 缺省 advisor（只读）；editor 仅 qoder 引擎，可写工作目录内的文件 */
   role?: PrintRole;
+  json?: boolean;
+}
+
+/** detach 的后台子进程由父进程预先分配运行编号，经环境变量传入；取走后清掉，不让它漏给下游进程 */
+function takeRunId(): string {
+  const given = process.env.PI_BRIDGE_RUN_ID;
+  delete process.env.PI_BRIDGE_RUN_ID;
+  if (given) {
+    assertRunId(given);
+    return given;
+  }
+  return newRunId();
 }
 
 /** 以 print 模式运行一轮（引擎取会话绑定的 record.engine）；调用方须持有会话锁。footer 附在回复与错误信息末尾 */
@@ -236,37 +395,133 @@ async function runPrint(
   footer = "",
 ): Promise<number> {
   const engine = record.engine ?? "pi";
+  const role = opts.role ?? "advisor";
   const log = logPath(record.name);
+  let run: RunRecord = {
+    runId: takeRunId(),
+    session: record.name,
+    role,
+    engine,
+    cwd: record.cwd,
+    status: "running",
+    startedAt: new Date().toISOString(),
+    message: preview(message),
+  };
+  pruneRuns();
+  // 运行记录先于事件、事件先于会话日志：读者看到任何一处，前面的都已落盘
+  writeRun(run);
+  appendEvent({ session: record.name, runId: run.runId, type: "start", text: message });
   writeFileSync(log, `[start] ${new Date().toISOString()} ${preview(message)}\n`);
-  const progress = (line: string): void => appendFileSync(log, `${line}\n`);
+  const progress = (line: string): void => {
+    appendFileSync(log, `${line}\n`);
+    const event = eventFromProgress(record.name, run.runId, line);
+    if (event) appendEvent(event);
+  };
   // qoder：底层会话可能还没建过（记录新建但首启失败过），以 sessionStarted 为准决定 --session-id/--resume
   let started = engine === "qoder" && record.sessionStarted === true;
-  const result = await runAdvisor({
-    engine,
-    role: opts.role ?? "advisor",
-    sessionName: record.name,
-    sessionId: sessionIdOf(record),
-    cwd: record.cwd,
-    message,
-    isNew: engine === "qoder" ? !started : isNew,
-    model: opts.model,
-    thinking: opts.thinking,
-    onStarted: () => (started = true),
-    onProgress: progress,
-  });
+  let result: Awaited<ReturnType<typeof runAdvisor>>;
+  try {
+    result = await runAdvisor({
+      engine,
+      role,
+      sessionName: record.name,
+      sessionId: sessionIdOf(record),
+      cwd: record.cwd,
+      message,
+      isNew: engine === "qoder" ? !started : isNew,
+      model: opts.model,
+      thinking: opts.thinking,
+      onStarted: () => (started = true),
+      onProgress: progress,
+    });
+  } catch (err) {
+    run = { ...run, status: "failed", endedAt: new Date().toISOString(), error: (err as Error).message, exitCode: 1 };
+    writeRun(run);
+    appendEvent({ session: record.name, runId: run.runId, type: "failed", text: run.error });
+    throw err;
+  }
   // engine 回填：没有该字段的旧记录跑完一轮后补上实际承接的引擎，之后角色守卫与运行不再依赖环境
   writeRecord({ ...record, engine, ...(started ? { sessionStarted: true } : {}), updatedAt: new Date().toISOString() });
 
   const notice = `${toolNotice(result.failedTools)}${footer}`;
+  const endedAt = new Date().toISOString();
   if (result.ok) {
+    run = { ...run, status: "done", endedAt, reply: `${result.reply}${notice}`, exitCode: 0 };
+    writeRun(run);
+    appendEvent({ session: record.name, runId: run.runId, type: "done" });
     progress(`[reply]\n${result.reply}${notice}\n${DONE}`);
-    print(`${result.reply}${notice}`);
+    if (opts.json) printJson(run);
+    else print(`${result.reply}${notice}`);
     return 0;
   }
+  run = { ...run, status: "failed", endedAt, reply: result.reply, error: `${result.error}${notice}`, exitCode: 1 };
+  writeRun(run);
+  appendEvent({ session: record.name, runId: run.runId, type: "failed", text: run.error });
   progress(`[error]\n${result.error}${notice}\n${FAILED}`);
-  if (result.reply) print(result.reply);
-  process.stderr.write(`pi-bridge: ${result.error}${notice}\n`);
+  if (opts.json) {
+    printJson(run);
+  } else {
+    if (result.reply) print(result.reply);
+    process.stderr.write(`pi-bridge: ${result.error}${notice}\n`);
+  }
   return 1;
+}
+
+/**
+ * 在后台子进程里重新执行本命令（args 是子进程的完整参数，stdin 可选），等它写出运行记录后返回 {session, runId}。
+ * 子进程自己拿会话锁、跑完整个运行，父进程退出不影响它；子进程在写出记录前失败（锁被占用、参数不合法等），
+ * 把它的输出作为错误抛出
+ */
+async function detachChild(args: string[], stdin?: string): Promise<number> {
+  const runId = newRunId();
+  const outFile = join(runsDir(), `${runId}.out`);
+  const fd = openSync(outFile, "w");
+  const child = spawn(process.execPath, [CLI_ENTRY, ...args], {
+    detached: true,
+    stdio: [stdin === undefined ? "ignore" : "pipe", fd, fd],
+    env: { ...process.env, PI_BRIDGE_RUN_ID: runId },
+  });
+  closeSync(fd);
+  let exited = false;
+  child.on("exit", () => (exited = true));
+  child.on("error", () => (exited = true));
+  if (stdin !== undefined) child.stdin!.end(stdin);
+  child.unref();
+
+  const deadline = Date.now() + DETACH_READY_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const run = readRun(runId);
+    if (run) {
+      printJson({ session: run.session, runId, status: run.status });
+      return 0;
+    }
+    if (exited) {
+      // 退出与记录的写入之间可能隔一拍，再查一次
+      const late = readRun(runId);
+      if (late) {
+        printJson({ session: late.session, runId, status: late.status });
+        return 0;
+      }
+      throw new Error(detachFailure(outFile));
+    }
+    await sleep(50);
+  }
+  throw new Error(`后台进程 ${DETACH_READY_TIMEOUT_MS / 1000} 秒内没有开始运行，输出见 ${outFile}`);
+}
+
+/** 后台子进程的输出：json 模式的错误是一行 {"status":"error","error":...}，其余原样 */
+function detachFailure(outFile: string): string {
+  const text = readFileSync(outFile, "utf8").trim();
+  rmSync(outFile, { force: true });
+  for (const line of text.split("\n").reverse()) {
+    try {
+      const parsed = JSON.parse(line) as { error?: string };
+      if (typeof parsed.error === "string") return parsed.error;
+    } catch {
+      // 不是 JSON 行
+    }
+  }
+  return text || "后台进程启动失败";
 }
 
 async function sendExecutor(name: string, message: string, opts: SendOptions): Promise<number> {
@@ -293,7 +548,17 @@ async function sendExecutor(name: string, message: string, opts: SendOptions): P
   } else {
     daemon = await startDaemon(name, opts);
   }
-  return awaitRun(name, request(daemon, { type: "prompt", message }));
+  if (opts.detach) {
+    for await (const msg of request(daemon, { type: "prompt", message, detach: true })) {
+      if (msg.type === "started") {
+        printJson({ session: name, runId: msg.runId, status: "running" });
+        return 0;
+      }
+      if (msg.type === "error") throw new Error(msg.error);
+    }
+    throw new Error("与常驻进程的连接中断");
+  }
+  return awaitRun(name, request(daemon, { type: "prompt", message }), opts.json);
 }
 
 /**
@@ -307,7 +572,7 @@ async function startDaemon(name: string, opts: SendOptions): Promise<Socket> {
   const release = acquireLock(name);
   let ensured: ReturnType<typeof ensureRecord>;
   try {
-    ensured = ensureRecord(name, opts.cwd, opts.worktree, opts.engine, opts.engineExplicit);
+    ensured = ensureRecord(name, opts.cwd, opts.worktree, opts.engine, opts.engineExplicit, opts.owner);
   } finally {
     release();
   }
@@ -363,42 +628,63 @@ async function stopDaemon(name: string): Promise<void> {
   }
 }
 
-async function stop(argv: string[]): Promise<number> {
-  const [name] = argv;
-  assertName(name);
-  await stopDaemon(name);
-  print(`已停止常驻进程 ${name}`);
+/** steer、abort、stop 的输出：--json 时一行 {status, session, text}，session 是实际作用的会话 */
+function printOk(name: string, text: string, json: boolean): number {
+  if (json) printJson({ status: "ok", session: name, text });
+  else print(text);
   return 0;
+}
+
+async function stop(argv: string[]): Promise<number> {
+  const { owner, json, rest } = takeFlags(argv);
+  const [requested] = rest;
+  assertName(requested);
+  const name = resolveOwned(requested, owner, "stop");
+  await stopDaemon(name);
+  return printOk(name, `已停止常驻进程 ${name}`, json);
 }
 
 async function steer(argv: string[]): Promise<number> {
-  const [name, raw] = argv;
-  assertName(name);
-  if (argv.length !== 2) throw new Error("需要恰好一条消息，含空格时请加引号，或用 - 从 stdin 读取");
-  print(await simpleRequest(name, { type: "steer", message: await readMessage(raw) }));
-  return 0;
+  const { owner, json, rest } = takeFlags(argv);
+  const [requested, raw] = rest;
+  assertName(requested);
+  if (rest.length !== 2) throw new Error("需要恰好一条消息，含空格时请加引号，或用 - 从 stdin 读取");
+  const name = resolveOwned(requested, owner, "steer");
+  return printOk(name, await simpleRequest(name, { type: "steer", message: await readMessage(raw) }), json);
 }
 
 async function abort(argv: string[]): Promise<number> {
-  const [name] = argv;
-  assertName(name);
-  print(await simpleRequest(name, { type: "abort" }));
-  return 0;
+  const { owner, json, rest } = takeFlags(argv);
+  const [requested] = rest;
+  assertName(requested);
+  const name = resolveOwned(requested, owner, "abort");
+  return printOk(name, await simpleRequest(name, { type: "abort" }), json);
 }
 
 async function answer(argv: string[]): Promise<number> {
   const { values, positionals } = parseArgs({
     args: argv,
     allowPositionals: true,
-    options: { cancel: { type: "boolean" } },
+    options: { cancel: { type: "boolean" }, json: { type: "boolean" }, detach: { type: "boolean" }, owner: { type: "string" } },
   });
-  const [name, id, raw] = positionals;
-  assertName(name);
+  const [requested, id, raw] = positionals;
+  assertName(requested);
   if (!id) throw new Error("缺少提问 id");
+  const name = resolveOwned(requested, values.owner, "answer");
+  const detach = values.detach ?? false;
   const req: ClientRequest = values.cancel
-    ? { type: "answer", id, cancelled: true }
-    : { type: "answer", id, value: await readMessage(raw) };
-  return awaitRun(name, request(await requireDaemon(name), req));
+    ? { type: "answer", id, cancelled: true, detach }
+    : { type: "answer", id, value: await readMessage(raw), detach };
+  const stream = request(await requireDaemon(name), req);
+  if (!detach) return awaitRun(name, stream, values.json ?? false);
+  for await (const msg of stream) {
+    if (msg.type === "ok") {
+      printJson({ session: name, status: "running" });
+      return 0;
+    }
+    if (msg.type === "error") throw new Error(msg.error);
+  }
+  throw new Error("与常驻进程的连接中断");
 }
 
 /**
@@ -558,6 +844,7 @@ function list(argv: string[]): number {
       here: { type: "boolean" },
       active: { type: "boolean" },
       engine: { type: "string" },
+      json: { type: "boolean" },
     },
   });
   if (values.all && values.here) throw new Error("--all 与 --here 不能同时使用");
@@ -592,6 +879,24 @@ function list(argv: string[]): number {
   });
   const visible = values.active ? rows.filter((row) => row.status !== "idle") : rows;
 
+  if (values.json) {
+    const latest = latestRunsBySession();
+    printJson(
+      visible.map(({ record, status }) => ({
+        name: record.name,
+        status,
+        engine: record.engine ?? "pi",
+        updatedAt: record.updatedAt,
+        cwd: record.cwd,
+        sessionId: sessionIdOf(record),
+        ...(record.worktree ? { worktree: { branch: record.worktree.branch, base: record.worktree.base } } : {}),
+        ...(record.owner ? { owner: record.owner } : {}),
+        ...(record.forkOf ? { forkOf: record.forkOf } : {}),
+        ...lastRunOf(latest.get(record.name)),
+      })),
+    );
+    return 0;
+  }
   if (visible.length === 0) {
     if (all.length === 0) {
       print("（没有会话）");
@@ -657,6 +962,9 @@ async function review(argv: string[]): Promise<number> {
       model: { type: "string" },
       thinking: { type: "string" },
       engine: { type: "string" },
+      json: { type: "boolean" },
+      detach: { type: "boolean" },
+      owner: { type: "string" },
     },
   });
   if (values.staged && values.base) throw new Error("--staged 与 --base 不能同时使用");
@@ -665,6 +973,23 @@ async function review(argv: string[]): Promise<number> {
     : values.base
       ? { kind: "base", ref: values.base }
       : { kind: "head" };
+  if (values.detach) {
+    // 补丁与评审会话都由后台子进程自己准备，父进程只等运行记录
+    const args = [
+      "review",
+      ...(values.staged ? ["--staged"] : []),
+      ...(values.base ? ["--base", values.base] : []),
+      "--cwd",
+      resolve(values.cwd ?? process.cwd()),
+      ...(values.focus ? ["--focus", values.focus] : []),
+      ...(values.model ? ["--model", values.model] : []),
+      ...(values.thinking ? ["--thinking", values.thinking] : []),
+      ...(values.engine ? ["--engine", values.engine] : []),
+      ...(values.owner !== undefined ? ["--owner", values.owner] : []),
+      "--json",
+    ];
+    return detachChild(args);
+  }
   const prepared = prepareReview({ cwd: resolve(values.cwd ?? process.cwd()), scope, focus: values.focus });
   try {
     const name = reviewSessionName();
@@ -677,10 +1002,11 @@ async function review(argv: string[]): Promise<number> {
         engine: resolveEngine(values.engine),
         createdAt: now,
         updatedAt: now,
+        ...(values.owner !== undefined ? { owner: values.owner } : {}),
       };
       writeRecord(record);
       const footer = `\n\n[pi-bridge] 评审会话：${name}，追问用 pi-bridge send ${name} <消息>`;
-      return await runPrint(record, true, prepared.message, { model: values.model, thinking: values.thinking }, footer);
+      return await runPrint(record, true, prepared.message, { model: values.model, thinking: values.thinking, json: values.json }, footer);
     } finally {
       release();
     }
@@ -695,6 +1021,29 @@ function reviewSessionName(): string {
   return `review-${stamp}-${process.pid}`;
 }
 
+function result(argv: string[]): number {
+  const [runId] = argv;
+  assertRunId(runId);
+  const run = readRun(runId);
+  if (!run) throw new Error(`没有这个运行：${runId}`);
+  printJson(run);
+  return 0;
+}
+
+/** 把全局事件日志里 --since 偏移之后的事件按行输出；--follow 持续跟随。每行一个 JSON 对象 */
+async function events(argv: string[]): Promise<number> {
+  const { values } = parseArgs({ args: argv, options: { since: { type: "string" }, follow: { type: "boolean" } } });
+  let offset = values.since === undefined ? 0 : Number(values.since);
+  if (!Number.isInteger(offset) || offset < 0) throw new Error(`--since 要一个非负整数（字节偏移）：${values.since}`);
+  for (;;) {
+    const next = readEvents(offset);
+    for (const event of next.events) printJson(event);
+    offset = next.offset;
+    if (!values.follow) return 0;
+    await sleep(WATCH_POLL_MS);
+  }
+}
+
 const commands: Record<string, (argv: string[]) => number | Promise<number>> = {
   send,
   watch,
@@ -705,6 +1054,8 @@ const commands: Record<string, (argv: string[]) => number | Promise<number>> = {
   answer,
   abort,
   review,
+  result,
+  events,
 };
 
 const [command, ...rest] = process.argv.slice(2);
@@ -716,7 +1067,10 @@ if (!handler) {
   try {
     process.exitCode = await handler(rest);
   } catch (err) {
-    process.stderr.write(`pi-bridge: ${(err as Error).message}\n`);
+    const message = (err as Error).message;
+    // 机器可读模式下错误也是一行 JSON，调用方不必同时解析 stderr
+    if (rest.includes("--json") || rest.includes("--detach")) printJson({ status: "error", error: message });
+    else process.stderr.write(`pi-bridge: ${message}\n`);
     process.exitCode = 1;
   }
 }

@@ -20,9 +20,9 @@ export interface Ask {
 
 /** 每个连接只发一条请求；常驻进程回完最后一条消息后关闭连接 */
 export type ClientRequest =
-  | { type: "prompt"; message: string }
+  | { type: "prompt"; message: string; detach?: boolean }
   | { type: "steer"; message: string }
-  | { type: "answer"; id: string; value?: string; cancelled?: boolean }
+  | { type: "answer"; id: string; value?: string; cancelled?: boolean; detach?: boolean }
   | { type: "abort" }
   | { type: "stop" }
   | { type: "watch"; waitStartMs: number };
@@ -33,9 +33,11 @@ export type DaemonMessage =
   | { type: "line"; line: string }
   /** watch 等不到新运行时，交出上一次运行的全部行 */
   | { type: "idle"; lines: string[] }
-  | { type: "ask"; ask: Ask }
-  | { type: "done"; text: string }
-  | { type: "failed"; error: string; text: string };
+  /** 一次运行开始，带运行编号；旧客户端不认识这个类型，会直接忽略 */
+  | { type: "started"; runId: string }
+  | { type: "ask"; ask: Ask; runId?: string }
+  | { type: "done"; text: string; runId?: string }
+  | { type: "failed"; error: string; text: string; runId?: string };
 
 export function formatAsk(name: string, ask: Ask): string {
   const command = `pi-bridge answer ${name} ${ask.id}`;
