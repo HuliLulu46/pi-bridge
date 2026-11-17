@@ -1,30 +1,30 @@
 ---
 name: pi-bridge
-description: 通过 pi-bridge 命令把任务交给 pi 或 qoderclicn coding agent（被调用方引擎缺省 pi，仅当用户明确要求 qoderclicn 时才用 --engine qoder；只要 Qoder 的模型则走 pi 的 --model qoder-local/<模型>）：以只读顾问身份做方案评审、方向判断、代码评审，或以执行者身份改代码（pi 的常驻进程，支持中途提问、任务中途插话或中止；qoder 的 editor 角色可编辑工作目录内的文件），按会话名多轮续接，可在 worktree 中隔离运行。当用户要求“让 pi 做 / 交给 pi / 问问 pi / 让 pi 评审 / 用 pi agent / 用 qoder 的模型评审 / 用 qoderclicn 评审 / 让 qoderclicn 改”，需要把任务委托给 pi 或 qoderclicn，或跨多个文件的改动在提交前需要第二意见时使用。
+description: 通过 pi-bridge 命令把任务交给 pi coding agent：以只读顾问身份做方案评审、方向判断、代码评审，或以执行者身份改代码（常驻进程，支持中途提问、任务中途插话或中止），按会话名多轮续接，可在 worktree 中隔离运行。当用户要求“让 pi 做 / 交给 pi / 问问 pi / 让 pi 评审 / 用 pi agent”，需要把任务委托给 pi，或跨多个文件的改动在提交前需要第二意见时使用。
 ---
 
 # pi-bridge
 
 `pi-bridge` 按会话名续接 pi 会话，stdout 只输出 pi 的最终回复。每次 `send` 用 `--role` 选择角色：
 
-| | advisor（缺省） | editor（仅 qoder 引擎） | executor（仅 pi 引擎） |
-|---|---|---|---|
-| 用途 | 讨论、方案评审、方向判断、代码评审、领域知识 | 改文件 | 改文件、跑命令 |
-| 运行方式 | 跑完即退出 | 跑完即退出 | 常驻进程：该会话没有常驻进程时自动启动，空闲 30 分钟自动退出 |
-| 能力 | 只读：pi 只有 read、grep、find、ls，qoder 只有 Read/Grep/Glob；不加载扩展/skill，不能联网 | Read/Grep/Glob + Edit/Write：只能编辑会话工作目录内的文件，没有 Bash，不加载外部 MCP | 完整环境：pi 的扩展、Claude 的 skill 与 MCP |
-| 中途提问 | 不能。疑问写在回复里，Claude 在下一次 `send` 中回答 | 不能，同 advisor | 能，见“回答 pi 的提问” |
-| 权限确认 | 不涉及 | 目录内编辑自动放行；目录外或需确认的操作被自动拒绝，列在回复末尾 | 一律自动拒绝，列在回复末尾 |
+| | advisor（缺省） | executor |
+|---|---|---|
+| 用途 | 讨论、方案评审、方向判断、代码评审、领域知识 | 改文件、跑命令 |
+| 运行方式 | 跑完即退出 | 常驻进程：该会话没有常驻进程时自动启动，空闲 30 分钟自动退出 |
+| 能力 | 只读：pi 只有 read、grep、find、ls；不加载扩展/skill，不能联网 | 完整环境：pi 的扩展、Claude 的 skill 与 MCP |
+| 中途提问 | 不能。疑问写在回复里，Claude 在下一次 `send` 中回答 | 能，见“回答 pi 的提问” |
+| 权限确认 | 不涉及 | 一律自动拒绝，列在回复末尾 |
 
-同一会话可以先以 advisor 讨论，再以 editor/executor 动手，上下文不断。
+同一会话可以先以 advisor 讨论，再以 executor 动手，上下文不断。
 
 ## 命令
 
 | 命令 | 作用 |
 |---|---|
-| `pi-bridge send <会话名> [--role advisor\|editor\|executor] [--engine pi\|qoder] [--cwd <目录>] [--model <模型>] [--thinking <等级>] [--worktree] <消息\|->` | 发送一条消息并等待回复；会话不存在时创建 |
-| `pi-bridge review [--engine pi\|qoder] [--staged \| --base <分支>] [--cwd <目录>] [--focus <关注点>] [--model <模型>] [--thinking <等级>]` | 以只读方式评审当前改动，见“让 pi 评审” |
+| `pi-bridge send <会话名> [--role advisor\|executor] [--cwd <目录>] [--model <模型>] [--thinking <等级>] [--worktree] <消息\|->` | 发送一条消息并等待回复；会话不存在时创建 |
+| `pi-bridge review [--staged \| --base <分支>] [--cwd <目录>] [--focus <关注点>] [--model <模型>] [--thinking <等级>]` | 以只读方式评审当前改动，见“让 pi 评审” |
 | `pi-bridge watch <会话名>` | 跟随该会话正在进行的运行 |
-| `pi-bridge list [--all \| --here] [--active] [--engine pi\|qoder]` | 列出会话：名字、状态（idle / running / daemon）、更新时间、目录、session-id；worktree 会话另附 `分支@base`。默认只列当前项目（git 主仓库根；worktree 会话与主仓库算同一项目），`--all` 列全部项目，`--active` 只列 running/daemon，`--engine` 按引擎过滤 |
+| `pi-bridge list [--all \| --here] [--active]` | 列出会话：名字、状态（idle / running / daemon）、更新时间、目录、session-id；worktree 会话另附 `分支@base`。默认只列当前项目（git 主仓库根；worktree 会话与主仓库算同一项目），`--all` 列全部项目，`--active` 只列 running/daemon |
 | `pi-bridge rm <会话名> [--force]` | 删除会话记录与 worktree（分支保留）；有常驻进程时先停止它，正在执行的任务随之中止；pi 的会话文件保留 |
 | `pi-bridge steer <会话名> <消息\|->` | executor 任务中途插话：当前这轮工具执行完后送达，pi 据此调整 |
 | `pi-bridge answer <会话名> <提问 id> <回答\|->` / `--cancel` | 回答 pi 的提问，然后继续等待 |
@@ -43,24 +43,6 @@ description: 通过 pi-bridge 命令把任务交给 pi 或 qoderclicn coding age
 - 委托方的系统提示（行为对齐原生 subagent：结论先行、如实汇报、不扩大范围、advisor 不反问）在 `src/prompts.ts`。
 
 Claude Code 里可用本仓库之外的 `pi` mod（`PiAgent` 工具）封装这套接口：后台派发、完成时自动唤醒、pi 提问走原生对话框。
-
-## 被调用方引擎：缺省 pi，用户显式声明才用 qoder
-
-“第二个大脑”缺省是 pi。pi 已经接入 Qoder 的模型（provider 名 `qoder-local`，由本机 qoder2api 服务提供），所以“用 Qoder 的模型”不需要换引擎：
-
-- 用户要 Qoder 的模型（如“用 qoder 评审”“用 Qwen3.8-Max”）：仍走 pi，加 `--model qoder-local/<模型>`，例如 `--model qoder-local/Qwen3.8-Max`。可用模型用 `pi --list-models qoder` 查看；使用前 qoder2api 服务必须在运行。
-- **只有用户明确要求 qoderclicn（说出 qoderclicn / qoder CLI / qoder 引擎）时，才加 `--engine qoder`**。用户没提就一律走 pi，不要因为任务类型（如需要改代码）或自行判断而切到 qoderclicn。
-- 改代码的任务没有声明 qoderclicn 时，用 pi 的 `--role executor`，不用 `--role editor`。
-
-两者对主控的用法完全一致——同样在后台跑、读回复、逐条核实。用 `--engine` 选择：
-
-- `--engine pi`（缺省）走 pi；`--engine qoder` 走 qoderclicn。也可用环境变量 `PI_BRIDGE_ENGINE=pi|qoder` 设**新建会话**的缺省，`--engine` 优先于它。
-- 引擎在会话**首次创建时绑定**，之后续接以绑定为准；对已存在的会话显式传入不同的 `--engine` 会报错。要换引擎就换一个会话名。
-- `send` 与 `review` 都支持 `--engine`。
-- **qoder 引擎支持 advisor、editor 与 review**；executor（常驻进程、中途提问、跑命令）仍由 pi 承接。对 qoder 会话请求 `--role executor` 会报错；对 pi 会话请求 `--role editor` 也会报错（pi 侧改代码用 executor）。
-- qoder 的 advisor 同样只读：工具被限制为 Read/Grep/Glob，不加载外部 MCP，读操作免权限打断。它的疑问只写在最终回复里（不像 pi 的 executor 能中途提问），由主控在下一轮回答。
-- qoder 的 editor（`--role editor`）在只读三件套之外加 Edit/Write，可编辑会话工作目录内的文件；没有 Bash（不能跑命令、不能提交），不加载外部 MCP。目录内的编辑自动放行，目录外或需要确认的操作被自动拒绝并列在回复末尾。editor 是一次性运行（跑完即退出），没有常驻进程，因此也不支持 steer/answer/abort；用 `watch` 看进度。
-- `--thinking` 的取值是 pi 的等级（`off/minimal/low/medium/high/xhigh/max`）；qoder 引擎下自动映射为 qoderclicn 的 `--reasoning-effort`（`off`→`none`、`minimal`→`low`，其余同名），也可直接传 qoder 独有的 `auto`/`ultracode`。
 
 ## 调用方式
 
@@ -113,7 +95,6 @@ watch 输出的行格式：`[start]` 本次消息摘要、`[tool]` 工具调用�
 - 工作目录在首次 `send` 时绑定（默认为当前目录），之后在哪里调用都在该目录运行；传入不同的 `--cwd` 会报错。要换目录就换一个会话名。
 - 角色每次 `send` 单独指定，不写就是 advisor：
   - executor 会话的后续消息同样要写 `--role executor`。漏写时，常驻进程还在则报错，补上即可；常驻进程已空闲退出则本轮以只读方式运行，pi 会说明无法修改。
-  - qoder 会话要让被调用方动手改文件时，每次都要写 `--role editor`；漏写就以只读 advisor 运行，它会说明无法修改。
   - 从 executor 切到 advisor 前先 `stop`。
 - 同一会话同一时间只能运行一个任务：advisor 运行中再 `send` 会因会话锁报错；executor 运行中再 `send` 会报错并提示改用 `steer`。需要并行时用不同会话名。
 - `--model` 一经指定就记入会话，之后不写时沿用；指定的模型不可用时该会话的每一轮都会失败，要显式换一个模型。executor 的 `--model` 与 `--thinking` 只在启动常驻进程的那次生效。

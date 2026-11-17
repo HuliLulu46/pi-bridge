@@ -1,4 +1,4 @@
-// 给被委托方（pi / qoder）的系统提示：行为对齐 Claude Code 原生 subagent。
+// 给被委托方（pi）的系统提示：行为对齐 Claude Code 原生 subagent。
 // 对话另一端是 Claude，不是人；最后一条消息是唯一被带回的内容。
 
 const CONTRACT = [
@@ -19,9 +19,9 @@ const EXECUTOR = [
   "只有被卡住、且不同选择会实质改变结果时，才用 question 工具提问；能合理假设的就假设，并在汇报里写明假设。",
 ];
 
-export type PromptRole = "advisor" | "editor" | "executor";
+export type PromptRole = "advisor" | "executor";
 
 export function subagentPrompt(role: PromptRole): string {
-  const extra = role === "executor" ? EXECUTOR : role === "editor" ? [...ADVISOR.slice(1)] : ADVISOR;
+  const extra = role === "executor" ? EXECUTOR : ADVISOR;
   return [...CONTRACT, ...extra].join("\n");
 }

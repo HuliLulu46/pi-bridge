@@ -6,12 +6,10 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import type { DaemonOptions } from "./daemon.ts";
-import { resolveEngine, runAdvisor, type Engine } from "./engine.ts";
+import { ADVISOR_ARGS, modelArgs, runPi, type Role } from "./pi.ts";
+import { subagentPrompt } from "./prompts.ts";
 import { preview, toolNotice } from "./events.ts";
 import { createWorktree, projectIdentity, removeWorktree, rollbackError, type RepoIdentity, type ReviewScope } from "./git.ts";
-import type { Role } from "./pi.ts";
-import type { PrintRole } from "./qoder.ts";
-import { nameToUuid } from "./qoder.ts";
 import { forkPiSession } from "./fork.ts";
 import { prepareReview } from "./review.ts";
 import {
@@ -44,11 +42,11 @@ import {
 } from "./store.ts";
 
 const USAGE = `用法：
-  pi-bridge send <会话名> [--role advisor|editor|executor] [--engine pi|qoder] [--cwd <目录>] [--model <模型>] [--thinking <等级>] [--worktree] <消息|->
+  pi-bridge send <会话名> [--role advisor|executor] [--cwd <目录>] [--model <模型>] [--thinking <等级>] [--worktree] <消息|->
   pi-bridge watch <会话名>
-  pi-bridge list [--all | --here] [--active] [--engine pi|qoder] [--json]
+  pi-bridge list [--all | --here] [--active] [--json]
   pi-bridge rm <会话名> [--force]
-  pi-bridge review [--engine pi|qoder] [--staged | --base <分支>] [--cwd <目录>] [--focus <关注点>] [--model <模型>] [--thinking <等级>]
+  pi-bridge review [--staged | --base <分支>] [--cwd <目录>] [--focus <关注点>] [--model <模型>] [--thinking <等级>]
   pi-bridge result <运行编号>
   pi-bridge events [--since <字节偏移>] [--follow]
 
@@ -68,13 +66,11 @@ send / answer / review 加 --detach 立即返回 {"session","runId"}（隐含 --
 对方正在运行或会话带 worktree 时拒绝；steer、answer、abort、stop 只作用于本主会话的会话或副本。steer、abort、stop 加 --json 输出一行 JSON
 
 消息写 - 时从 stdin 读取。首次 send 创建会话并绑定 cwd（默认当前目录），之后固定在该目录运行。
---role 缺省为 advisor：只读，跑完即退出。editor 仅 qoder 引擎可用：可编辑工作目录内的文件（Edit/Write，无 Bash），同样跑完即退出。
-executor 在常驻进程中运行（仅 pi 引擎），没有常驻进程时自动启动，空闲 30 分钟自动退出；
-pi 提问时 send 打印提问并以退出码 2 退出，用 answer 回答后继续等待。会话有常驻进程时，先 stop 才能以 advisor/editor 发送。
+--role 缺省为 advisor：只读，跑完即退出。
+executor 在常驻进程中运行，没有常驻进程时自动启动，空闲 30 分钟自动退出；
+pi 提问时 send 打印提问并以退出码 2 退出，用 answer 回答后继续等待。会话有常驻进程时，先 stop 才能以 advisor 发送。
 创建会话时加 --worktree，会在 <仓库>/.pi-bridge/worktrees/<会话名> 建立分支为 pi/<会话名> 的 worktree 并在其中运行。
---engine 选择被调用方：pi（缺省）或 qoder（qoderclicn）。只在建会话时生效并绑定到该会话，续接时以绑定为准；
-也可用环境变量 PI_BRIDGE_ENGINE 设新建缺省。qoder 引擎支持 advisor、editor 与 review；executor 仍走 pi。
-list 默认只列当前项目（git 主仓库根；worktree 会话与主仓库算同一项目）的会话：--all 列全部，--here 等同默认，--active 只列 running/daemon，--engine 按引擎过滤。`;
+list 默认只列当前项目（git 主仓库根；worktree 会话与主仓库算同一项目）的会话：--all 列全部，--here 等同默认，--active 只列 running/daemon。`;
 
 const EXIT_ASK = 2;
 /** watch 启动后等待任务开始的时长，覆盖 send 与 watch 同时启动时的先后顺序，以及常驻进程的启动超时 */
@@ -129,25 +125,16 @@ function ensureRecord(
   name: string,
   cwdOption: string | undefined,
   worktree: boolean,
-  engine: Engine,
-  engineExplicit: boolean,
   owner?: string,
 ): { record: SessionRecord; isNew: boolean } {
   const existing = readRecord(name);
   if (existing && worktree) throw new Error(`会话 ${name} 已存在，worktree 只能在创建会话时指定`);
   const cwd = resolve(cwdOption ?? existing?.cwd ?? process.cwd());
   if (existing && existing.cwd !== cwd) throw new Error(`会话 ${name} 绑定在 ${existing.cwd}，不能改到 ${cwd}`);
-  if (existing) {
-    // 会话已绑定引擎，续接以记录为准；只有显式 --engine 与绑定不一致才报错，env 仅在新建时生效
-    const bound = existing.engine ?? "pi";
-    if (engineExplicit && engine !== bound) {
-      throw new Error(`会话 ${name} 绑定的引擎是 ${bound}，不能改用 ${engine}`);
-    }
-    return { record: existing, isNew: false };
-  }
+  if (existing) return { record: existing, isNew: false };
   if (!existsSync(cwd)) throw new Error(`目录不存在：${cwd}`);
   const now = new Date().toISOString();
-  const base = { name, engine, createdAt: now, updatedAt: now, ...(owner !== undefined ? { owner } : {}) };
+  const base = { name, createdAt: now, updatedAt: now, ...(owner !== undefined ? { owner } : {}) };
   if (!worktree) {
     const record = { ...base, cwd };
     writeRecord(record);
@@ -215,7 +202,7 @@ function ownerTag(owner: string): string {
 /**
  * 带 --owner（主会话 id）时，决定实际作用的会话：
  * - 会话不存在、无主或属于这个主会话：就用它（send 时无主的记到这个主会话名下）
- * - 属于别的主会话：本主会话从它分出过副本就用副本；send 时没有副本就分一份（qoder 不分，照常共用）
+ * - 属于别的主会话：本主会话从它分出过副本就用副本；send 时没有副本就分一份
  * - 别的主会话的会话正在运行、带 worktree，或 steer/answer/abort/stop 而没有副本：拒绝
  */
 function resolveOwned(name: string, owner: string | undefined, op: OwnerOp): string {
@@ -227,7 +214,7 @@ function resolveOwned(name: string, owner: string | undefined, op: OwnerOp): str
     if (op === "send" && !isBusy(name)) writeRecord({ ...record, owner });
     return name;
   }
-  if (record.owner === owner || (record.engine ?? "pi") === "qoder") return name;
+  if (record.owner === owner) return name;
   const mine = listRecords().find((r) => r.forkOf === name && r.owner === owner);
   if (mine) return mine.name;
   if (op !== "send") throw new Error(`会话 ${name} 属于另一个主会话，不能 ${op}`);
@@ -241,7 +228,7 @@ function resolveOwned(name: string, owner: string | undefined, op: OwnerOp): str
   if (readRecord(fork)) throw new Error(`副本名 ${fork} 已被别的会话占用；请换一个新会话名`);
   forkPiSession(sessionIdOf(record), fork, record.cwd);
   const now = new Date().toISOString();
-  writeRecord({ name: fork, cwd: record.cwd, engine: "pi", createdAt: now, updatedAt: now, owner, forkOf: name });
+  writeRecord({ name: fork, cwd: record.cwd, createdAt: now, updatedAt: now, owner, forkOf: name });
   return fork;
 }
 
@@ -270,8 +257,6 @@ interface SendOptions {
   model?: string;
   thinking?: string;
   worktree: boolean;
-  engine: Engine;
-  engineExplicit: boolean;
   /** 以 JSON 输出结果 */
   json: boolean;
   /** 立即返回运行编号，任务在后台继续（隐含 json） */
@@ -287,7 +272,6 @@ async function send(argv: string[]): Promise<number> {
     allowPositionals: true,
     options: {
       role: { type: "string", default: "advisor" },
-      engine: { type: "string" },
       cwd: { type: "string" },
       model: { type: "string" },
       thinking: { type: "string" },
@@ -301,32 +285,18 @@ async function send(argv: string[]): Promise<number> {
   assertName(requested);
   if (positionals.length !== 2) throw new Error("需要恰好一条消息，含空格时请加引号，或用 - 从 stdin 读取");
   const role = values.role as Role;
-  if (role !== "advisor" && role !== "editor" && role !== "executor") {
-    throw new Error(`--role 只能是 advisor、editor 或 executor：${role}`);
+  if (role !== "advisor" && role !== "executor") {
+    throw new Error(`--role 只能是 advisor 或 executor：${role}`);
   }
-  const engine = resolveEngine(values.engine);
   const owner = values.owner;
   // 属于别的主会话时改用（必要时分出）本主会话的副本
   const name = resolveOwned(requested, owner, "send");
-  // 会话已存在（含没有 engine 字段的旧记录，实际由 pi 承接）以记录为准，否则以本次解析出的引擎为准
-  const existing = readRecord(name);
-  const effectiveEngine = existing ? existing.engine ?? "pi" : engine;
-  // executor（常驻进程、中途提问）只支持 pi
-  if (role === "executor" && effectiveEngine === "qoder") {
-    throw new Error("qoder 引擎暂不支持 executor（常驻进程与中途提问）；executor 请用 pi（--engine pi，且不要设 PI_BRIDGE_ENGINE=qoder）");
-  }
-  // editor（可写文件）只支持 qoder：pi 侧对应的能力是 executor
-  if (role === "editor" && effectiveEngine !== "qoder") {
-    throw new Error("--role editor 仅 qoder 引擎可用：加 --engine qoder（或设 PI_BRIDGE_ENGINE=qoder）；pi 侧请用 --role executor");
-  }
   const message = await readMessage(raw);
   const opts: SendOptions = {
     cwd: values.cwd,
     model: values.model,
     thinking: values.thinking,
     worktree: values.worktree ?? false,
-    engine,
-    engineExplicit: values.engine !== undefined,
     json: (values.json ?? false) || (values.detach ?? false),
     detach: values.detach ?? false,
     owner,
@@ -338,7 +308,6 @@ async function send(argv: string[]): Promise<number> {
       name,
       "--role",
       role,
-      ...(values.engine ? ["--engine", values.engine] : []),
       ...(values.cwd ? ["--cwd", resolve(values.cwd)] : []),
       ...(values.model ? ["--model", values.model] : []),
       ...(values.thinking ? ["--thinking", values.thinking] : []),
@@ -349,19 +318,19 @@ async function send(argv: string[]): Promise<number> {
     ];
     return detachChild(args, message);
   }
-  return role === "executor" ? sendExecutor(name, message, opts) : sendPrint(name, message, role, opts);
+  return role === "executor" ? sendExecutor(name, message, opts) : sendPrint(name, message, opts);
 }
 
-async function sendPrint(name: string, message: string, role: PrintRole, opts: SendOptions): Promise<number> {
+async function sendPrint(name: string, message: string, opts: SendOptions): Promise<number> {
   const daemon = await openDaemon(name);
   if (daemon) {
     daemon.destroy();
-    throw new Error(`会话 ${name} 有常驻进程，先 pi-bridge stop ${name}（正在执行的任务会被中止），再以 ${role} 发送`);
+    throw new Error(`会话 ${name} 有常驻进程，先 pi-bridge stop ${name}（正在执行的任务会被中止），再以 advisor 发送`);
   }
   const release = acquireLock(name);
   try {
-    const { record, isNew } = ensureRecord(name, opts.cwd, opts.worktree, opts.engine, opts.engineExplicit, opts.owner);
-    return await runPrint(record, isNew, message, { model: opts.model, thinking: opts.thinking, role, json: opts.json });
+    const { record, isNew } = ensureRecord(name, opts.cwd, opts.worktree, opts.owner);
+    return await runPrint(record, isNew, message, { model: opts.model, thinking: opts.thinking, json: opts.json });
   } finally {
     release();
   }
@@ -370,8 +339,6 @@ async function sendPrint(name: string, message: string, role: PrintRole, opts: S
 interface PrintOptions {
   model?: string;
   thinking?: string;
-  /** 缺省 advisor（只读）；editor 仅 qoder 引擎，可写工作目录内的文件 */
-  role?: PrintRole;
   json?: boolean;
 }
 
@@ -386,7 +353,7 @@ function takeRunId(): string {
   return newRunId();
 }
 
-/** 以 print 模式运行一轮（引擎取会话绑定的 record.engine）；调用方须持有会话锁。footer 附在回复与错误信息末尾 */
+/** 以 print 模式运行一轮；调用方须持有会话锁。footer 附在回复与错误信息末尾 */
 async function runPrint(
   record: SessionRecord,
   isNew: boolean,
@@ -394,14 +361,11 @@ async function runPrint(
   opts: PrintOptions,
   footer = "",
 ): Promise<number> {
-  const engine = record.engine ?? "pi";
-  const role = opts.role ?? "advisor";
   const log = logPath(record.name);
   let run: RunRecord = {
     runId: takeRunId(),
     session: record.name,
-    role,
-    engine,
+    role: "advisor",
     cwd: record.cwd,
     status: "running",
     startedAt: new Date().toISOString(),
@@ -417,21 +381,13 @@ async function runPrint(
     const event = eventFromProgress(record.name, run.runId, line);
     if (event) appendEvent(event);
   };
-  // qoder：底层会话可能还没建过（记录新建但首启失败过），以 sessionStarted 为准决定 --session-id/--resume
-  let started = engine === "qoder" && record.sessionStarted === true;
-  let result: Awaited<ReturnType<typeof runAdvisor>>;
+  let result: Awaited<ReturnType<typeof runPi>>;
   try {
-    result = await runAdvisor({
-      engine,
-      role,
-      sessionName: record.name,
+    result = await runPi({
       sessionId: sessionIdOf(record),
       cwd: record.cwd,
       message,
-      isNew: engine === "qoder" ? !started : isNew,
-      model: opts.model,
-      thinking: opts.thinking,
-      onStarted: () => (started = true),
+      piArgs: [...(isNew ? ["--name", record.name] : []), ...ADVISOR_ARGS, "--append-system-prompt", subagentPrompt("advisor"), ...modelArgs(opts.model, opts.thinking)],
       onProgress: progress,
     });
   } catch (err) {
@@ -440,8 +396,7 @@ async function runPrint(
     appendEvent({ session: record.name, runId: run.runId, type: "failed", text: run.error });
     throw err;
   }
-  // engine 回填：没有该字段的旧记录跑完一轮后补上实际承接的引擎，之后角色守卫与运行不再依赖环境
-  writeRecord({ ...record, engine, ...(started ? { sessionStarted: true } : {}), updatedAt: new Date().toISOString() });
+  writeRecord({ ...record, updatedAt: new Date().toISOString() });
 
   const notice = `${toolNotice(result.failedTools)}${footer}`;
   const endedAt = new Date().toISOString();
@@ -529,18 +484,13 @@ async function sendExecutor(name: string, message: string, opts: SendOptions): P
   if (daemon) {
     const record = readRecord(name);
     const boundCwd = record?.cwd;
-    // 常驻进程路径不经过 ensureRecord，显式引擎冲突要在这里查
-    const boundEngine = record?.engine ?? "pi";
-    const conflict =
-      opts.engineExplicit && opts.engine !== boundEngine
-        ? `会话 ${name} 绑定的引擎是 ${boundEngine}，不能改用 ${opts.engine}`
-        : opts.worktree
-          ? `会话 ${name} 已存在，worktree 只能在创建会话时指定`
-          : opts.cwd && resolve(opts.cwd) !== boundCwd
-            ? `会话 ${name} 绑定在 ${boundCwd}，不能改到 ${resolve(opts.cwd)}`
-            : opts.model || opts.thinking
-              ? "常驻进程运行中，--model 与 --thinking 只在启动常驻进程时生效"
-              : undefined;
+    const conflict = opts.worktree
+      ? `会话 ${name} 已存在，worktree 只能在创建会话时指定`
+      : opts.cwd && resolve(opts.cwd) !== boundCwd
+        ? `会话 ${name} 绑定在 ${boundCwd}，不能改到 ${resolve(opts.cwd)}`
+        : opts.model || opts.thinking
+          ? "常驻进程运行中，--model 与 --thinking 只在启动常驻进程时生效"
+          : undefined;
     if (conflict) {
       daemon.destroy();
       throw new Error(conflict);
@@ -572,7 +522,7 @@ async function startDaemon(name: string, opts: SendOptions): Promise<Socket> {
   const release = acquireLock(name);
   let ensured: ReturnType<typeof ensureRecord>;
   try {
-    ensured = ensureRecord(name, opts.cwd, opts.worktree, opts.engine, opts.engineExplicit, opts.owner);
+    ensured = ensureRecord(name, opts.cwd, opts.worktree, opts.owner);
   } finally {
     release();
   }
@@ -843,15 +793,10 @@ function list(argv: string[]): number {
       all: { type: "boolean" },
       here: { type: "boolean" },
       active: { type: "boolean" },
-      engine: { type: "string" },
       json: { type: "boolean" },
     },
   });
   if (values.all && values.here) throw new Error("--all 与 --here 不能同时使用");
-  const engine = values.engine;
-  if (engine !== undefined && engine !== "pi" && engine !== "qoder") {
-    throw new Error(`--engine 只能是 pi 或 qoder：${engine}`);
-  }
 
   const all = listRecords();
   // 解析符号链接后取目录的 Git 身份（同一仓库的所有 worktree 共享 common，子模块/独立仓库各异）；按目录缓存，避免逐条记录重复调用 git
@@ -867,11 +812,9 @@ function list(argv: string[]): number {
   };
   // 默认按当前项目过滤；--all 关闭过滤
   const current = values.all ? undefined : identityOf(process.cwd());
-  const scoped = all.filter((record) => {
-    if (current !== undefined && !sameProject(identityOf(record.worktree?.repo ?? record.cwd), current)) return false;
-    if (engine !== undefined && (record.engine ?? "pi") !== engine) return false;
-    return true;
-  });
+  const scoped = all.filter(
+    (record) => current === undefined || sameProject(identityOf(record.worktree?.repo ?? record.cwd), current),
+  );
   const rows = scoped.map((record) => {
     const held = lockHolder(record.name) !== undefined;
     const status = !held ? "idle" : existsSync(runPath(record.name, "sock")) ? "daemon" : "running";
@@ -885,7 +828,6 @@ function list(argv: string[]): number {
       visible.map(({ record, status }) => ({
         name: record.name,
         status,
-        engine: record.engine ?? "pi",
         updatedAt: record.updatedAt,
         cwd: record.cwd,
         sessionId: sessionIdOf(record),
@@ -901,10 +843,7 @@ function list(argv: string[]): number {
     if (all.length === 0) {
       print("（没有会话）");
     } else if (scoped.length === 0) {
-      const tips: string[] = [];
-      if (current !== undefined) tips.push("--all 看全部项目");
-      if (engine !== undefined) tips.push(`去掉 --engine ${engine} 看其他引擎`);
-      print(`（当前范围没有会话，全部 ${all.length} 个${tips.length > 0 ? `；试试 ${tips.join("，")}` : ""}）`);
+      print(`（当前范围没有会话，全部 ${all.length} 个${current !== undefined ? "；试试 --all 看全部项目" : ""}）`);
     } else {
       print(`（当前范围有 ${scoped.length} 个会话，但都不活跃；去掉 --active 查看）`);
     }
@@ -933,17 +872,11 @@ async function rm(argv: string[]): Promise<number> {
     if (record.worktree) removeWorktree(record.worktree, record.cwd, values.force ?? false);
     removeRecord(name);
     const worktreeNote = record.worktree ? `；worktree 已删除，分支 ${record.worktree.branch} 保留` : "";
-    const engine = record.engine ?? "pi";
     // 旧格式记录的 UUID 只存在于这份记录里，删除后同名 send 会以会话名新建会话
     const resumeNote = record.id
       ? `；这是旧格式会话，同名再 send 会新建会话，旧历史在 ${record.cwd} 执行 pi --session-id ${record.id} 打开`
-      : engine === "qoder"
-        ? "，同名再 send 加 --engine qoder 会续接（引擎绑定随记录一起删除，缺省引擎不是 qoder 时必须显式指定）"
-        : "，同名再 send 会续接";
-    const historyNote =
-      engine === "qoder"
-        ? `qoder 会话文件（${nameToUuid(record.name)}，由会话名派生）仍保留`
-        : `pi 会话文件（${sessionIdOf(record)}）仍保留`;
+      : "，同名再 send 会续接";
+    const historyNote = `pi 会话文件（${sessionIdOf(record)}）仍保留`;
     print(`已删除会话 ${name}，${historyNote}${resumeNote}${worktreeNote}`);
     return 0;
   } finally {
@@ -961,7 +894,6 @@ async function review(argv: string[]): Promise<number> {
       focus: { type: "string" },
       model: { type: "string" },
       thinking: { type: "string" },
-      engine: { type: "string" },
       json: { type: "boolean" },
       detach: { type: "boolean" },
       owner: { type: "string" },
@@ -984,7 +916,6 @@ async function review(argv: string[]): Promise<number> {
       ...(values.focus ? ["--focus", values.focus] : []),
       ...(values.model ? ["--model", values.model] : []),
       ...(values.thinking ? ["--thinking", values.thinking] : []),
-      ...(values.engine ? ["--engine", values.engine] : []),
       ...(values.owner !== undefined ? ["--owner", values.owner] : []),
       "--json",
     ];
@@ -999,7 +930,6 @@ async function review(argv: string[]): Promise<number> {
       const record: SessionRecord = {
         name,
         cwd: prepared.root,
-        engine: resolveEngine(values.engine),
         createdAt: now,
         updatedAt: now,
         ...(values.owner !== undefined ? { owner: values.owner } : {}),

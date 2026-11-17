@@ -12,7 +12,6 @@ export interface RunRecord {
   runId: string;
   session: string;
   role: string;
-  engine: string;
   cwd: string;
   status: RunStatus;
   startedAt: string;

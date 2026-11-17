@@ -154,7 +154,6 @@ function startRun(message: string): void {
     runId: newRunId(),
     session: name,
     role: "executor",
-    engine: record.engine ?? "pi",
     cwd: record.cwd,
     status: "running",
     startedAt: new Date().toISOString(),

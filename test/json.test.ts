@@ -72,7 +72,7 @@ test("send --json 失败：stdout 是 status failed 的 JSON，退出码 1", () 
 
 test("--json 下运行之外的错误也是一行 JSON", () => {
   ({ home } = setup());
-  const result = run(["send", "s1", "--role", "editor", "--json", "hi"]);
+  const result = run(["send", "s1", "--role", "boss", "--json", "hi"]);
   assert.equal(result.code, 1);
   assert.equal(json(result.stdout).status, "error");
 });
@@ -113,7 +113,6 @@ test("list --json：每个会话一个对象，带状态与引擎", () => {
   assert.equal(rows.length, 1);
   assert.equal(rows[0].name, "s1");
   assert.equal(rows[0].status, "idle");
-  assert.equal(rows[0].engine, "pi");
 });
 
 test("list --json：带每个会话最近一次运行的状态，失败时附原因；文本模式不变", () => {
