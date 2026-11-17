@@ -1,0 +1,8 @@
+{
+  "name": "cc-pi-agent",
+  "private": true,
+  "scripts": {
+    "test": "claude plugin test .",
+    "validate": "claude plugin validate ."
+  }
+}

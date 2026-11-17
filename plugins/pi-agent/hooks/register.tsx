@@ -46,8 +46,8 @@ const PI_TOOL = {
   mcp: false,
   description:
     '把任务交给 pi（另一个 coding agent），或管理已有的 pi 会话。action 缺省为 send。\n' +
-    '- send：派发任务，立即返回 runId，后台运行，完成/失败时自动通知，不要轮询。需要 session、message，可选 description（3-5 字摘要，显示在界面上）、role、engine、cwd、model、thinking、worktree。session 属于别的主会话时自动派到本会话的副本，结果里会说明。\n' +
-    '  role=advisor（缺省）只读，用于评审/调研/方向判断；role=executor 可改文件跑命令，需写明授权修改的目录以及能否提交；role=editor 仅 qoder 引擎。\n' +
+    '- send：派发任务，立即返回 runId，后台运行，完成/失败时自动通知，不要轮询。需要 session、message，可选 description（3-5 字摘要，显示在界面上）、role、cwd、model、thinking、worktree。session 属于别的主会话时自动派到本会话的副本，结果里会说明。\n' +
+    '  role=advisor（缺省）只读，用于评审/调研/方向判断；role=executor 可改文件跑命令，需写明授权修改的目录以及能否提交。\n' +
     '  pi 看不到当前对话，message 必须自包含（目标、文件绝对路径、完成标准、希望汇报的内容）。\n' +
     '- review：让 pi 只读评审当前仓库改动，可选 staged、base、cwd、focus、model、thinking。\n' +
     '- steer：executor 任务进行中插话，需要 session、message。\n' +
@@ -62,8 +62,7 @@ const PI_TOOL = {
       description: { ...str, description: '3-5 字任务摘要' },
       session: { ...str, description: '会话名：字母数字与 . _ -，首尾须是字母或数字；同一件事复用同一个名字以续接上下文' },
       message: str,
-      role: { type: 'string', enum: ['advisor', 'executor', 'editor'] },
-      engine: { type: 'string', enum: ['pi', 'qoder'], description: '仅用户明确要求 qoderclicn 时才用 qoder' },
+      role: { type: 'string', enum: ['advisor', 'executor'] },
       cwd: str,
       model: str,
       thinking: str,
@@ -499,7 +498,7 @@ async function describe($: any, runId: string, what: string): Promise<string> {
 // 给主 agent 看的运行记录：几行头部加原样正文。不用 JSON，换行不转义，也不带派发时自己写的 message
 function formatRun(r: Json): string {
   const head = [
-    [r.runId, r.session, r.role, r.engine, r.status].filter(Boolean).join(' · '),
+    [r.runId, r.session, r.role, r.status].filter(Boolean).join(' · '),
     `${r.startedAt ?? ''}${r.endedAt ? ` → ${r.endedAt}` : ''}${r.cwd ? ` · ${r.cwd}` : ''}`,
   ]
   if (r.status === 'asking' && r.ask) head.push(`待回答的提问：${JSON.stringify(r.ask)}`)
@@ -526,16 +525,16 @@ function listTable(sessions: Json[], scope: string, me: string, running: Set<str
   const wide = scope !== 'session'
   const rows = sessions
     .filter((r) => wide || isMine(r))
-    .map((r) => [r.name, ...(wide ? [isMine(r) ? 'mine' : r.owner ? 'other' : '-'] : []), r.status, lastRun(r.lastRun), r.forkOf ?? '-', r.engine, r.updatedAt, r.cwd].join('\t'))
+    .map((r) => [r.name, ...(wide ? [isMine(r) ? 'mine' : r.owner ? 'other' : '-'] : []), r.status, lastRun(r.lastRun), r.forkOf ?? '-', r.updatedAt, r.cwd].join('\t'))
   const note = SCOPE_NOTE[scope] ?? ''
   if (rows.length === 0) return `${note}\n（没有）`
-  return `${note}\n${['name', ...(wide ? ['owner'] : []), 'status', 'lastRun', 'forkOf', 'engine', 'updatedAt', 'cwd'].join('\t')}\n${rows.join('\n')}`
+  return `${note}\n${['name', ...(wide ? ['owner'] : []), 'status', 'lastRun', 'forkOf', 'updatedAt', 'cwd'].join('\t')}\n${rows.join('\n')}`
 }
 
 async function send($: any, i: Json) {
   const role = i.role ?? 'advisor'
   const args = ['send', i.session, '--role', role, '--detach', ...(await ownerArgs($))]
-  for (const k of ['engine', 'cwd', 'model', 'thinking'] as const) if (i[k]) args.push(`--${k}`, i[k])
+  for (const k of ['cwd', 'model', 'thinking'] as const) if (i[k]) args.push(`--${k}`, i[k])
   if (i.worktree) args.push('--worktree')
   args.push('-')
   const { code, out } = await cli($, args, String(i.message))

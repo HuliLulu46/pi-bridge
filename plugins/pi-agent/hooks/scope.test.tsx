@@ -12,12 +12,12 @@ const RECORDS: Record<string, Record<string, unknown>> = {
   'other-s': { name: 'other-s', cwd: '/w', owner: 's2' },
 }
 const SESSIONS = [
-  { name: 'mine-s', status: 'idle', engine: 'pi', updatedAt: 't1', cwd: '/w', owner: 's1' },
-  { name: 'claimed-s', status: 'idle', engine: 'pi', updatedAt: 't2', cwd: '/elsewhere', owner: 's1' },
-  { name: 'fork-s.s1', status: 'idle', engine: 'pi', updatedAt: 't2', cwd: '/w', owner: 's1', forkOf: 'other-s' },
-  { name: 'legacy-s', status: 'idle', engine: 'pi', updatedAt: 't3', cwd: '/w' },
-  { name: 'other-s', status: 'idle', engine: 'pi', updatedAt: 't4', cwd: '/w', owner: 's2' },
-  { name: 'free-s', status: 'idle', engine: 'pi', updatedAt: 't5', cwd: '/w' },
+  { name: 'mine-s', status: 'idle', updatedAt: 't1', cwd: '/w', owner: 's1' },
+  { name: 'claimed-s', status: 'idle', updatedAt: 't2', cwd: '/elsewhere', owner: 's1' },
+  { name: 'fork-s.s1', status: 'idle', updatedAt: 't2', cwd: '/w', owner: 's1', forkOf: 'other-s' },
+  { name: 'legacy-s', status: 'idle', updatedAt: 't3', cwd: '/w' },
+  { name: 'other-s', status: 'idle', updatedAt: 't4', cwd: '/w', owner: 's2' },
+  { name: 'free-s', status: 'idle', updatedAt: 't5', cwd: '/w' },
 ]
 const LEGACY_RUN = { 'r-bbb333-333333': { session: 'legacy-s', role: 'advisor', summary: '', startedAt: 0, status: 'running' } }
 

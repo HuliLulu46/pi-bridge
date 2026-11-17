@@ -1,1 +1,1 @@
-{ "name": "pi", "version": "0.2.0", "description": "PiAgent：把任务委托给 pi-bridge 的 pi / qoder agent，后台运行，完成时唤醒主 agent，提问走原生对话框，运行中的任务常驻显示在输入框上方" }
+{ "name": "pi", "version": "0.2.0", "description": "PiAgent：把任务委托给 pi-bridge 的 pi agent，后台运行，完成时唤醒主 agent，提问走原生对话框，运行中的任务常驻显示在输入框上方" }
