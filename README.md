@@ -13,6 +13,8 @@ This repository is a Claude Code plugin marketplace with two plugins:
 
 You rarely type commands yourself. Say "ask pi about this design", "hand this to pi" or "have pi review it" and Claude picks the role, runs pi in the background, reads the result and checks each point before reporting.
 
+![Dispatching a pi review with PiAgent](docs/images/01-dispatch-status-line.png)
+
 ## What it does
 
 ### 1. Advisor: a second opinion on demand
@@ -92,6 +94,12 @@ With only `pi-bridge`, Claude runs `pi-bridge send` through Bash and either wait
 - Running tasks show above the prompt; `/pi` opens a pane to watch progress, steer or abort.
 - `fork=true` lets pi inherit the current conversation.
 - Sessions belong to the Claude Code session that started them, across `/clear` and resume; a name owned by another main session is forked into a copy automatically.
+
+![PiAgent pane while a review runs](docs/images/02-pane-running.png)
+
+![Completion notice delivered to Claude](docs/images/03-completion-notice.png)
+
+![Claude's verified report next to pi's full reply](docs/images/04-verified-report.png)
 
 > The UI is in English; the instructions and tool description `PiAgent` gives the model are currently in Chinese.
 

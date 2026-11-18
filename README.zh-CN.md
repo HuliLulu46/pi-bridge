@@ -13,6 +13,8 @@
 
 日常使用不需要手敲命令。在 Claude Code 里说“问问 pi 这个方案”“交给 pi 改”“让 pi 评审一下”，Claude 会选好角色、在后台运行、读结果，并逐条核实后再汇报给你。
 
+![用 PiAgent 派发 pi 评审](docs/images/01-dispatch-status-line.png)
+
 ## 能做什么
 
 ### 1. 只读顾问：随时拿到第二意见
@@ -94,6 +96,12 @@ Claude 能根据你的意图回答的直接回答，拿不准的再问你；`pi-
 - 运行中的任务显示在输入框上方；`/pi` 打开面板，可以查看进度、插话（steer）、中止。
 - `fork=true` 时 pi 继承当前对话的上下文，不必在消息里重复背景。
 - 会话按 Claude Code 主会话归属：`/clear` 或恢复会话后仍认得自己派出的任务；别的主会话用了同名会话时，自动派到本会话的副本。
+
+![运行中的 /pi 面板](docs/images/02-pane-running.png)
+
+![Claude 收到的完成通知](docs/images/03-completion-notice.png)
+
+![Claude 核实后的汇报与 pi 的完整回复](docs/images/04-verified-report.png)
 
 > 界面文案是英文；`PiAgent` 注入给模型的说明和工具描述目前是中文。
 
