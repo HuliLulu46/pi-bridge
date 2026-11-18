@@ -23,7 +23,9 @@ const ABORT_GRACE_MS = 30_000
 const PANE = 'pi'
 const RECENT_MAX = 8
 // 面板的界面状态：只在模块里，改了就 invalidate；打开面板时重置
-const view: { sel?: string; tab?: 'running' | 'done'; mode: 'list' | 'detail' | 'steer'; text?: string } = { mode: 'list' }
+// text / events 是已完成任务详情页的内容，loading 是已经发起加载的 runId；events 为 undefined 表示还没读完
+const view: { sel?: string; tab?: 'running' | 'done'; mode: 'list' | 'detail' | 'steer'; text?: string; events?: Json[]; loading?: string } = { mode: 'list' }
+const clearDetail = () => { view.text = undefined; view.events = undefined; view.loading = undefined }
 
 const GUIDE = [
   '# 委托给 pi（PiAgent 工具）',
@@ -262,7 +264,19 @@ async function readRecent($: any, owned: Set<string>): Promise<Recent[]> {
   return finishedCache.items.filter((r) => owned.has(r.session)).slice(0, RECENT_MAX)
 }
 
-// 事件日志末尾 64KB 里某次运行的事件（面板的“最近动作”和待回答的提问）
+function pickEvents(lines: string[], runId: string): Json[] {
+  const out: Json[] = []
+  for (const line of lines) {
+    if (!line.includes(runId)) continue
+    try {
+      const ev = JSON.parse(line)
+      if (ev.runId === runId) out.push(ev)
+    } catch {}
+  }
+  return out
+}
+
+// 事件日志末尾 64KB 里某次运行的事件（运行中详情的信息流、预览的“最近动作”、待回答的提问）
 async function runEvents($: any, runId: string): Promise<Json[]> {
   try {
     const file = `${await homeOf($)}/.pi-bridge/events.ndjson`
@@ -271,30 +285,109 @@ async function runEvents($: any, runId: string): Promise<Json[]> {
     const text: string = await $.fs.read(file, { offset, length: size - offset })
     const lines = text.split('\n')
     if (offset > 0) lines.shift()
-    const out: Json[] = []
-    for (const line of lines) {
-      try {
-        const ev = JSON.parse(line)
-        if (ev.runId === runId) out.push(ev)
-      } catch {}
-    }
-    return out
+    return pickEvents(lines, runId)
   } catch {
     return []
   }
 }
 
+// 已完成任务的全部事件：整份日志（含轮转出去的 .1，先旧后新）里按 runId 取。
+// 只在进入详情页时读一次；render 每个轮询周期都会跑，不能走这里
+async function allRunEvents($: any, runId: string): Promise<Json[]> {
+  const file = `${await homeOf($)}/.pi-bridge/events.ndjson`
+  const out: Json[] = []
+  for (const path of [`${file}.1`, file]) {
+    try {
+      out.push(...pickEvents((await $.fs.read(path) as string).split('\n'), runId))
+    } catch {}
+  }
+  return out
+}
+
+const oneLine = (s: string) => s.replace(/\s+/g, ' ').trim()
+const baseName = (path: string) => path.split('/').filter(Boolean).pop() ?? path
+
+// 工具事件的 text 是“名字 入参JSON”，入参被截到 200 字：grep 的 pattern、bash 的 command 常常截断成不合法的 JSON。
+// 整段解析不了就按字段名抽（取到字符串开头为止）
+function field(args: string, parsed: Json | undefined, name: string): string | undefined {
+  if (parsed) return typeof parsed[name] === 'string' ? parsed[name] : undefined
+  const m = new RegExp(`"${name}":"((?:[^"\\\\]|\\\\.)*)`).exec(args)
+  if (!m) return undefined
+  try {
+    return JSON.parse(`"${m[1]}"`)
+  } catch {
+    return m[1]!.replace(/\\n/g, ' ').replace(/\\"/g, '"')
+  }
+}
+
+// “grep {"path":"/a/b/c.ts","pattern":"foo"}” → { name: 'grep', arg: 'foo  c.ts' }
+export function briefOf(text: string): { name: string; arg: string } {
+  const i = text.indexOf(' ')
+  if (i < 0) return { name: text, arg: '' }
+  const name = text.slice(0, i)
+  const args = text.slice(i + 1)
+  let parsed: Json | undefined
+  try {
+    const v = JSON.parse(args)
+    if (v && typeof v === 'object') parsed = v
+  } catch {}
+  const lead = ['command', 'pattern', 'question', 'query', 'url'].map((f) => field(args, parsed, f)).find((v) => v !== undefined)
+  const where = field(args, parsed, 'path') ?? field(args, parsed, 'file_path')
+  const arg = [lead && oneLine(lead), where && baseName(where)].filter(Boolean).join('  ')
+  return { name, arg: arg || oneLine(args) }
+}
+
 // “read {"path":"/a/b/c.ts"}” → “read c.ts”
 function toolBrief(text: string): string {
-  const i = text.indexOf(' ')
-  const name = i < 0 ? text : text.slice(0, i)
-  try {
-    const a = JSON.parse(text.slice(i + 1))
-    const arg = String(a.path ?? a.file_path ?? a.command ?? a.pattern ?? a.question ?? '')
-    return `${name} ${arg.split('/').pop()?.slice(0, 40) ?? ''}`.trim()
-  } catch {
-    return name
-  }
+  const { name, arg } = briefOf(text)
+  return `${name} ${arg.slice(0, 40)}`.trim()
+}
+
+// 信息流里出现的事件。start / model / done / failed 在表头和回复里已有，不重复
+type FeedRow = { at: number; mark: string; color?: string; name: string; arg: string }
+const FEED: Record<string, { mark: string; color?: string; name?: string }> = {
+  tool: { mark: ' ' },
+  'tool-error': { mark: '✗', color: 'error', name: 'error' },
+  retry: { mark: '⟳', color: 'warning', name: 'retry' },
+  steer: { mark: '↪', color: 'suggestion', name: 'steer' },
+  ask: { mark: '?', color: 'warning', name: 'ask' },
+  answered: { mark: '✓', color: 'success', name: 'answered' },
+  'ask-timeout': { mark: '!', color: 'warning', name: 'ask timed out' },
+  'confirm-denied': { mark: '!', color: 'warning', name: 'denied' },
+}
+
+export function feedOf(events: Json[]): FeedRow[] {
+  return events.flatMap((ev): FeedRow[] => {
+    const kind = FEED[ev.type]
+    if (!kind) return []
+    const text = String(ev.text ?? '')
+    const { name, arg } = ev.type === 'tool' ? briefOf(text) : { name: kind.name!, arg: oneLine(text) }
+    return [{ at: Date.parse(ev.ts) || 0, mark: kind.mark, color: kind.color, name, arg }]
+  })
+}
+
+const clockOf = (at: number) => new Date(at).toTimeString().slice(0, 8)
+
+// 最近 limit 条；传了 now 就把最后一条标成“当前动作”并写上它已持续多久（距上一条事件，分不清是在跑工具还是在想）
+function feedView({ Box, Text }: { Box: any; Text: any }, rows: FeedRow[], limit: number, now?: number) {
+  const shown = rows.slice(-limit)
+  return (
+    <Box flexDirection="column">
+      {rows.length > shown.length && <Text dimColor>         … {rows.length - shown.length} earlier</Text>}
+      {shown.map((r, n) => {
+        const current = now !== undefined && n === shown.length - 1
+        return (
+          <Text key={`feed-${n}`} wrap="truncate-end">
+            <Text dimColor>{clockOf(r.at)}  </Text>
+            <Text color={current ? 'success' : r.color}>{current ? '▸' : r.mark} </Text>
+            <Text bold={current} color={r.color}>{r.name}</Text>
+            <Text dimColor>  {r.arg}</Text>
+            {current && <Text color="success">  {elapsed(now - r.at)}</Text>}
+          </Text>
+        )
+      })}
+    </Box>
+  )
 }
 
 async function paneAbort($: any, runId: string, session: string) {
@@ -321,11 +414,15 @@ async function paneStop($: any, session: string) {
   $.ui.toast(code === 0 ? `Stopped the daemon of ${session}` : `Stop failed: ${typeof out === 'string' ? out : out.error}`)
 }
 
-// 进入已完成任务的详情页时加载完整回复
+// 详情页停在已完成任务上、内容还没加载时由 render 调用：加载完整回复和这次运行的全部事件。
+// 同步先记下 loading，render 每个周期都会来问，只发起一次；没读完就返回或切走时，丢掉过期的结果
 async function paneLoad($: any, runId: string) {
-  view.text = undefined
-  const r = await readRunFile($, runId)
+  clearDetail()
+  view.loading = runId
+  const [r, events] = await Promise.all([readRunFile($, runId), allRunEvents($, runId)])
+  if (view.loading !== runId) return
   view.text = r ? String(r.reply || r.error || '(no reply)') : 'Failed to read the run'
+  view.events = events
   $.ui.invalidate('ui.render')
 }
 
@@ -782,7 +879,7 @@ export const register: Register = (on) => {
     view.mode = 'list'
     view.sel = undefined
     view.tab = undefined
-    view.text = undefined
+    clearDetail()
     await $.ui.open({ id: PANE, title: 'PiAgent', focus: true, closeOnEscape: true })
     return {}
   })
@@ -851,8 +948,10 @@ export const register: Register = (on) => {
     ]
     const liveRows = rows.filter((r) => r.live)
     const doneRows = rows.filter((r) => !r.live)
-    // 没手动切过就默认：有运行中的看运行中，否则看已完成
-    const tab = view.tab ?? (liveRows.length > 0 ? 'running' : 'done')
+    // 详情页盯着的任务结束后会从“运行中”挪到“已完成”：跟着它切过去，别退回到别的任务。
+    // 其余情况没手动切过就默认：有运行中的看运行中，否则看已完成
+    const watched = view.mode === 'detail' ? rows.find((r) => r.runId === view.sel) : undefined
+    const tab = watched ? (watched.live ? 'running' : 'done') : view.tab ?? (liveRows.length > 0 ? 'running' : 'done')
     const shown = tab === 'running' ? liveRows : doneRows
     const goTab = (t: 'running' | 'done') => { view.tab = t; view.sel = undefined; view.mode = 'list'; $.ui.invalidate('ui.render') }
     const tabs = (
@@ -887,7 +986,9 @@ export const register: Register = (on) => {
     const evs = cur.live ? await runEvents($, cur.runId) : []
     const tools = evs.filter((x) => x.type === 'tool').map((x) => toolBrief(String(x.text ?? '')))
     const ask = cur.live && cur.run.status === 'asking' ? [...evs].reverse().find((x) => x.type === 'ask')?.ask : undefined
-    const back = () => { view.mode = 'list'; view.text = undefined; $.ui.invalidate('ui.render') }
+    const feed = feedOf(cur.live ? evs : view.events ?? [])
+    const back = () => { view.mode = 'list'; clearDetail(); $.ui.invalidate('ui.render') }
+    if (view.mode === 'detail' && !cur.live && view.loading !== cur.runId) void paneLoad($, cur.runId)
 
     // ---- 详情页
     if (view.mode === 'steer' && cur.live) {
@@ -915,7 +1016,6 @@ export const register: Register = (on) => {
           <Box flexDirection="column">
             {head}
             <Text bold>{cur.run.summary || cur.session}</Text>
-            {tools.length > 0 && <Text dimColor wrap="truncate-end">Recent {tools.slice(-8).join(' → ')}</Text>}
             {ask && (
               <Box flexDirection="column">
                 <Text color="warning" bold>? {String(ask.title || 'pi is asking')}</Text>
@@ -924,6 +1024,9 @@ export const register: Register = (on) => {
                 ))}
               </Box>
             )}
+            {feed.length > 0
+              ? feedView({ Box, Text }, feed, 10, cur.run.status === 'running' ? now : undefined)
+              : <Text dimColor>Waiting for pi to start…</Text>}
             <Box>
               <Button key="back" label="Back" hotkey="b" onPress={back} />
               <Text>  </Text>
@@ -936,9 +1039,18 @@ export const register: Register = (on) => {
           </Box>
         )
       }
+      const activity = view.events && (
+        <Box flexDirection="column">
+          {feed.length > 0
+            ? feedView({ Box, Text }, feed, 10)
+            : <Text dimColor>{view.events.length === 0 ? 'The activity log for this run has been rotated away.' : 'No tool calls in this run.'}</Text>}
+          <Text color="subtle">╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌</Text>
+        </Box>
+      )
       return (
         <Box flexDirection="column">
           {head}
+          {activity}
           <Text>{view.text ?? 'Loading…'}</Text>
           <Button key="back" label="Back" hotkey="b" onPress={back} />
         </Box>
@@ -955,8 +1067,7 @@ export const register: Register = (on) => {
         <Button key={`row-${row.runId}`} label={`${row.session} ${tail}`} onPress={() => {
           view.sel = row.runId
           view.mode = 'detail'
-          view.text = undefined
-          if (!row.live) void paneLoad($, row.runId)
+          clearDetail()
           $.ui.invalidate('ui.render')
         }}>
           <Text color={picked ? 'suggestion' : 'inactive'}>{picked ? '▸ ' : '  '}</Text>
