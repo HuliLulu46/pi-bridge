@@ -256,8 +256,11 @@ function takeFlags(argv: string[]): { owner?: string; json: boolean; rest: strin
   let owner: string | undefined;
   let json = false;
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === "--owner") owner = argv[++i];
-    else if (argv[i] === "--json") json = true;
+    if (argv[i] === "--owner") {
+      const value = argv[++i];
+      if (value === undefined) throw new Error("--owner 需要一个主会话 id");
+      owner = value;
+    } else if (argv[i] === "--json") json = true;
     else rest.push(argv[i]!);
   }
   return { owner, json, rest };
