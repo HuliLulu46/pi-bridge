@@ -2,7 +2,7 @@ import { rmSync, writeFileSync } from "node:fs";
 import { collectReview, NUL_MARKER, type ReviewPatch, type ReviewScope } from "./git.ts";
 import { reviewPatchPath } from "./store.ts";
 
-export interface ReviewOptions {
+interface ReviewOptions {
   cwd: string;
   scope: ReviewScope;
   focus?: string;
@@ -25,7 +25,7 @@ function scopeText(scope: ReviewScope): string {
 }
 
 /** 按码点把超长的行切成多行，非末段的行尾加续行标记 */
-export function wrapLongLines(text: string): string {
+function wrapLongLines(text: string): string {
   return text
     .split("\n")
     .map((line) => {
@@ -76,7 +76,7 @@ function writePatchFile(patch: string): string {
   return file;
 }
 
-export interface PreparedReview {
+interface PreparedReview {
   /** 仓库根目录，评审会话在此运行 */
   root: string;
   message: string;

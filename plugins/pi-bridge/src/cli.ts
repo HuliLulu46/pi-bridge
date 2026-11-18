@@ -269,7 +269,6 @@ interface SendOptions {
   model?: string;
   thinking?: string;
   worktree: boolean;
-  /** 以 JSON 输出结果 */
   json: boolean;
   /** 立即返回运行编号，任务在后台继续（隐含 json） */
   detach: boolean;
@@ -468,15 +467,7 @@ async function detachChild(args: string[], stdin?: string): Promise<number> {
       printJson({ session: run.session, runId, status: run.status });
       return 0;
     }
-    if (exited) {
-      // 退出与记录的写入之间可能隔一拍，再查一次
-      const late = readRun(runId);
-      if (late) {
-        printJson({ session: late.session, runId, status: late.status });
-        return 0;
-      }
-      throw new Error(detachFailure(outFile));
-    }
+    if (exited) throw new Error(detachFailure(outFile));
     await sleep(50);
   }
   throw new Error(`后台进程 ${DETACH_READY_TIMEOUT_MS / 1000} 秒内没有开始运行，输出见 ${outFile}`);
@@ -586,7 +577,6 @@ async function startDaemon(name: string, opts: SendOptions): Promise<Socket> {
   throw new Error(`常驻进程 ${DAEMON_READY_TIMEOUT_MS / 1000} 秒内未就绪，输出见 ${startErr}`);
 }
 
-/** 请求常驻进程停止，等到它释放会话锁 */
 /** 请求常驻进程停止，等到它释放会话锁；之后被别的命令接手的锁不算在内 */
 async function stopDaemon(name: string): Promise<void> {
   const holder = lockHolder(name);
@@ -657,11 +647,6 @@ async function answer(argv: string[]): Promise<number> {
   throw new Error("与常驻进程的连接中断");
 }
 
-/**
- * 等待期内反复查找正在进行的运行：常驻进程能连上就交给它（它在空闲时会继续等新运行开始），
- * print 模式的日志属于当前持锁的运行就跟随日志。等待期覆盖常驻进程的启动超时，
- * 也容许 watch 先于首次 send 创建会话记录
- */
 /**
  * 等待期内反复查找正在进行的运行：常驻进程能连上就交给它（它在空闲时会继续等新运行开始，
  * 等待中退出则回到这里继续找）；print 模式的日志属于当前持锁的运行就跟随日志；
@@ -830,7 +815,6 @@ function list(argv: string[]): number {
     }
     return entry;
   };
-  // 默认按当前项目过滤；--all 关闭过滤
   const current = values.all ? undefined : identityOf(process.cwd());
   const scoped = all.filter(
     (record) => current === undefined || sameProject(identityOf(record.worktree?.repo ?? record.cwd), current),
@@ -863,7 +847,7 @@ function list(argv: string[]): number {
     if (all.length === 0) {
       print("（没有会话）");
     } else if (scoped.length === 0) {
-      print(`（当前范围没有会话，全部 ${all.length} 个${current !== undefined ? "；试试 --all 看全部项目" : ""}）`);
+      print(`（当前范围没有会话，全部 ${all.length} 个；试试 --all 看全部项目）`);
     } else {
       print(`（当前范围有 ${scoped.length} 个会话，但都不活跃；去掉 --active 查看）`);
     }

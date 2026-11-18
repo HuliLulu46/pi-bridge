@@ -62,10 +62,8 @@ export function projectIdentity(cwd: string): RepoIdentity {
   const toplevel = revParseField(cwd, "--show-toplevel");
   if (toplevel === undefined || toplevel === "") return {};
   const commonDir = revParseField(cwd, "--git-common-dir");
-  // commonDir 以 -- 开头说明 git 过旧、把未知选项原样回显，此时不可信，退回仅用 toplevel。
   // 经 resolve 归一后再解析符号链接：.git 被软链到别处时，主工作区与 linked worktree 报出的 common 才能一致
-  const common =
-    commonDir === undefined || commonDir === "" || commonDir.startsWith("--") ? undefined : realPathOrSelf(resolve(cwd, commonDir));
+  const common = commonDir === undefined || commonDir === "" ? undefined : realPathOrSelf(resolve(cwd, commonDir));
   return { toplevel, common };
 }
 
@@ -105,7 +103,7 @@ export function displayPath(path: string): string {
 
 // ---------- 改动清单 ----------
 
-export interface Snapshot {
+interface Snapshot {
   head: string | undefined;
   /** 路径（相对仓库根目录） → 两位状态码与内容哈希（文件不存在或是目录时为空串） */
   entries: Map<string, { code: string; hash: string }>;
@@ -193,10 +191,6 @@ export function trackChanges(cwd: string): () => string {
 
 // ---------- worktree ----------
 
-export function worktreePath(repo: string, name: string): string {
-  return join(repo, ".pi-bridge", "worktrees", name);
-}
-
 function ensureExcluded(repo: string): void {
   const file = resolve(repo, git(repo, ["rev-parse", "--git-path", "info/exclude"]).trim());
   const content = existsSync(file) ? readFileSync(file, "utf8") : "";
@@ -205,7 +199,7 @@ function ensureExcluded(repo: string): void {
   appendFileSync(file, `${content === "" || content.endsWith("\n") ? "" : "\n"}${EXCLUDE_RULE}\n`);
 }
 
-export interface CreatedWorktree {
+interface CreatedWorktree {
   path: string;
   info: WorktreeInfo;
   /** 撤销本次创建的 worktree 与分支，返回未能完成的清理步骤 */
@@ -260,7 +254,7 @@ export function createWorktree(cwd: string, name: string): CreatedWorktree {
   if (tryGit(repo, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`]) !== undefined) {
     throw new Error(`分支已存在：${branch}`);
   }
-  const path = worktreePath(repo, name);
+  const path = join(repo, ".pi-bridge", "worktrees", name);
   if (existsSync(path)) throw new Error(`worktree 路径已存在：${path}`);
 
   // 前面已确认分支与路径都不存在，回滚时删除它们不会误删已有内容

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { preview } from "./events.ts";
 import type { Ask } from "./protocol.ts";
 
-export type RunStatus = "running" | "asking" | "done" | "failed";
+type RunStatus = "running" | "asking" | "done" | "failed";
 
 export interface RunRecord {
   runId: string;
@@ -42,7 +42,7 @@ export type EventType =
   | "failed";
 
 /** 全局事件日志的一行。不含回复正文，正文在运行记录里按 runId 取 */
-export interface BridgeEvent {
+interface BridgeEvent {
   /** ISO 时间。读者用字节偏移定位，不依赖序号 */
   ts: string;
   session: string;
@@ -58,7 +58,7 @@ export interface BridgeEvent {
  * 本次运行动作记录（runs/<runId>.activity.ndjson）的一行：全局事件的不截断版，
  * 外加 tracker 给的 tool（带调用 id 和完整入参）、tool-end、note
  */
-export interface ActivityEvent extends Omit<BridgeEvent, "type"> {
+interface ActivityEvent extends Omit<BridgeEvent, "type"> {
   type: EventType | "tool-end" | "note";
   /** tool / tool-end 的调用 id */
   id?: string;
@@ -66,7 +66,6 @@ export interface ActivityEvent extends Omit<BridgeEvent, "type"> {
   error?: boolean;
 }
 
-const EVENT_TEXT_MAX = 300;
 const ACTIVITY_TEXT_MAX = 4000;
 /** 事件日志超过这个大小就轮转：旧的改名为 .1（只留一份），读者发现偏移超出文件大小会从头读新文件 */
 const EVENTS_MAX_BYTES = Number(process.env.PI_BRIDGE_EVENTS_MAX_BYTES ?? 4 * 1024 * 1024);
@@ -83,7 +82,7 @@ export function runsDir(): string {
   return dir;
 }
 
-export function eventsPath(): string {
+function eventsPath(): string {
   mkdirSync(homeDir(), { recursive: true });
   return join(homeDir(), "events.ndjson");
 }
@@ -97,7 +96,7 @@ export function assertRunId(runId: string | undefined): asserts runId is string 
   if (!runId || !/^r-[a-z0-9]+-[a-f0-9]{6}$/.test(runId)) throw new Error(`runId 格式不对：${runId ?? "(空)"}`);
 }
 
-export function runRecordPath(runId: string): string {
+function runRecordPath(runId: string): string {
   return join(runsDir(), `${runId}.json`);
 }
 
@@ -116,12 +115,12 @@ export function writeRun(record: RunRecord): void {
   renameSync(tmp, path);
 }
 
-export function activityPath(runId: string): string {
+function activityPath(runId: string): string {
   return join(runsDir(), `${runId}.activity.ndjson`);
 }
 
 /**
- * 每次运行只有一个写入者（它的常驻进程或前台进程），行长不受全局日志的 300 字限制，文本最长 ACTIVITY_TEXT_MAX；
+ * 每次运行只有一个写入者（它的常驻进程或前台进程），行长不受全局日志的 preview 截断，文本最长 ACTIVITY_TEXT_MAX；
  * 随运行记录一起被 pruneRuns 清理。只给界面看：写不进去就算了，不能打断运行，也不能挡住全局日志
  */
 export function appendActivity(event: Omit<ActivityEvent, "ts">): void {
@@ -139,14 +138,14 @@ export function appendActivity(event: Omit<ActivityEvent, "ts">): void {
 
 /**
  * 写全局日志，同时把文本更长的版本写进本次运行的动作记录（tool 除外：tracker 另写带调用 id 和入参的版本）。
- * 全局日志一次 O_APPEND 写入一整行；行长受 EVENT_TEXT_MAX 限制，并发写入不会交错
+ * 全局日志一次 O_APPEND 写入一整行；文本经 preview 截断，并发写入不会交错
  */
 export function appendEvent(event: Omit<BridgeEvent, "ts">): void {
   if (event.type !== "tool") appendActivity(event);
   const line: BridgeEvent = {
     ts: new Date().toISOString(),
     ...event,
-    ...(event.text !== undefined ? { text: preview(event.text).slice(0, EVENT_TEXT_MAX) } : {}),
+    ...(event.text !== undefined ? { text: preview(event.text) } : {}),
   };
   const path = eventsPath();
   try {
@@ -158,7 +157,8 @@ export function appendEvent(event: Omit<BridgeEvent, "ts">): void {
 }
 
 /** 删除超过保留期的运行记录与后台输出；失败不影响运行 */
-export function pruneRuns(now = Date.now()): void {
+export function pruneRuns(): void {
+  const now = Date.now();
   try {
     const dir = runsDir();
     for (const file of readdirSync(dir)) {

@@ -12,7 +12,7 @@ type Runs = Record<string, Run>
 type PendingAsk = { session: string; ask: Json }
 type Recent = { runId: string; session: string; status: 'done' | 'failed' | 'aborted'; endedAt: number; head: string }
 /** 待送达的完成/失败通知；sentAt 有值表示已提交、还没确认送达 */
-type Note = { runId: string; note: string; at: number; sentAt?: number }
+type Note = { runId: string; note: string; sentAt?: number }
 
 // 主会话的忙闲：插件提交的提示要等空闲才执行，排队时这一轮被 Esc 打断，它会被丢掉，
 // 所以通知先落进 store，忙时不提交，确认送达后才删除。模块变量，重载后从“空闲”开始
@@ -102,11 +102,11 @@ async function cliOf($: any): Promise<string> {
 
 async function cli($: any, args: string[], stdin?: string): Promise<{ code: number; out: Json | string }> {
   const r = await $.process.run(['node', await cliOf($), ...args], { stdin, timeoutMs: 90_000 })
-  const text = String(r.stdout ?? '').trim()
+  const text = r.stdout.trim()
   try {
-    return { code: r.exitCode, out: JSON.parse(text.split('\n').at(-1) ?? '') }
+    return { code: r.exitCode, out: JSON.parse(text.split('\n').at(-1)) }
   } catch {
-    return { code: r.exitCode, out: text || String(r.stderr ?? '').trim() }
+    return { code: r.exitCode, out: text || r.stderr.trim() }
   }
 }
 
@@ -156,12 +156,6 @@ async function keyOf($: any, name: string): Promise<string> {
     }
     sessionKey = key
     transcriptId = tid
-    // 旧版本留下的键：不分会话的 runs/cursor，没人读的 recent:*，改由 pi-bridge 记归属后不用的 owned:*。尽力而为
-    try {
-      for (const k of (await $.store.keys()) as string[]) {
-        if (k === 'runs' || k === 'cursor' || k.startsWith('recent:') || k.startsWith('owned:')) await $.store.delete(k)
-      }
-    } catch {}
   })()
   await sessionInit
   return `${name}:${sessionKey}`
@@ -251,8 +245,8 @@ async function readRecent($: any, owned: Set<string>): Promise<Recent[]> {
             const r = JSON.parse(await $.fs.read(`${dir}/${name}`))
             if (r.status === 'done' || r.status === 'failed') {
               const aborted = r.status === 'failed' && /abort/i.test(String(r.error ?? ''))
-              const body = String(r.reply || r.error || '').trim().split('\n')[0] ?? ''
-              cached.item = { runId: r.runId, session: r.session, status: aborted ? 'aborted' : r.status, endedAt: Date.parse(r.endedAt) || x.mtimeMs, head: body.slice(0, 60) || (r.status === 'done' ? 'done' : 'failed') }
+              const body = String(r.reply || r.error || '').trim().split('\n')[0]!
+              cached.item = { runId: r.runId, session: r.session, status: aborted ? 'aborted' : r.status, endedAt: Date.parse(r.endedAt) || x.mtimeMs, head: body.slice(0, 60) || r.status }
             }
           } catch {}
           recordCache.set(name, cached)
@@ -463,8 +457,7 @@ async function paneLoad($: any, runId: string) {
 }
 
 // 没变就不写也不重画：invalidate 会让本插件匹配到的界面实例全部重跑。
-// 已知的窄竞态：读和写之间隔着一次 store 往返，两个 dispatch 恰好同时改同一个键时后写的会覆盖先写的；
-// 空闲 tick 不再写，只剩轮询真有变化又撞上 send / turn 钩子的情况
+// 已知的窄竞态：读和写之间隔着一次 store 往返，两个 dispatch 恰好同时改同一个键时后写的会覆盖先写的
 async function mutateRuns($: any, fn: (runs: Runs) => void): Promise<void> {
   const key = await keyOf($, 'runs')
   const before = JSON.stringify((await $.store.get(key)) ?? {})
@@ -586,17 +579,16 @@ function startPolling($: any) {
         for (const runId of Object.keys(known)) {
           if (finished.some((f) => f.runId === runId)) continue
           const r = await readRunFile($, runId)
-          if (r?.status === 'done' || r?.status === 'failed') finished.push({ runId, what: r.status === 'done' ? 'done' : 'failed' })
+          if (r?.status === 'done' || r?.status === 'failed') finished.push({ runId, what: r.status })
         }
       }
       // 通知先进待送达队列，再删运行、推进游标：中途出错最多重复，不会丢
       if (finished.length > 0) {
         const notes: string[] = []
         for (const f of finished) notes.push(await describe($, f.runId, f.what))
-        const now = Date.now()
         await mutatePending($, (list) => [
           ...list,
-          ...finished.map((f, i) => ({ runId: f.runId, note: notes[i]!, at: now })).filter((n) => n.note && !list.some((o) => o.runId === n.runId)),
+          ...finished.map((f, i) => ({ runId: f.runId, note: notes[i]! })).filter((n) => !list.some((o) => o.runId === n.runId)),
         ])
       }
       if (finished.length > 0 || states.size > 0 || models.size > 0) {
@@ -812,8 +804,7 @@ async function dispatch($: any, i: Json) {
       return show(typeof out === 'string' ? out : String(out.text ?? ''))
     }
     case 'list': {
-      // all 是旧参数，当 scope=all
-      const scope = String(i.scope ?? (i.all ? 'all' : 'session'))
+      const scope = String(i.scope ?? 'session')
       if (scope !== 'session' && scope !== 'project' && scope !== 'all') return fail(`scope must be session, project or all: ${scope}`)
       const runs = ((await $.store.get(await keyOf($, 'runs'))) ?? {}) as Runs
       const running = new Set(Object.values(runs).map((r) => r.session))
@@ -838,7 +829,7 @@ async function dispatch($: any, i: Json) {
 function parseModel(text: string): { model: string; thinking?: string } {
   const parts = text.trim().split(/\s+/)
   const thinking = parts.length > 1 ? parts[parts.length - 1] : undefined
-  const name = parts.length > 1 ? parts.slice(0, -1).join(' ') : parts[0] ?? ''
+  const name = parts.length > 1 ? parts.slice(0, -1).join(' ') : parts[0]!
   const slash = name.indexOf('/')
   return { model: slash >= 0 ? name.slice(slash + 1) : name, thinking }
 }
@@ -1077,7 +1068,7 @@ export const register: Register = (on) => {
           <Text bold color="suggestion">{cur.session}</Text>
           {cur.live
             ? <Text dimColor>  {cur.run.role}{how(cur.run)} · {elapsed(now - cur.run.startedAt)}</Text>
-            : <Text dimColor>  {cur.recent.status === 'done' ? 'done' : cur.recent.status === 'aborted' ? 'aborted' : 'failed'}</Text>}
+            : <Text dimColor>  {cur.recent.status}</Text>}
         </Text>
       )
       if (cur.live) {
@@ -1150,7 +1141,7 @@ export const register: Register = (on) => {
       </Box>
     ) : (
       <Box flexDirection="column">
-        <Text wrap="truncate-end"><Text color={curColor}>{cur.recent.status === 'done' ? 'done' : cur.recent.status === 'aborted' ? 'aborted' : 'failed'}</Text><Text dimColor> · </Text><Text>{cur.recent.head}</Text></Text>
+        <Text wrap="truncate-end"><Text color={curColor}>{cur.recent.status}</Text><Text dimColor> · </Text><Text>{cur.recent.head}</Text></Text>
       </Box>
     )
     return (

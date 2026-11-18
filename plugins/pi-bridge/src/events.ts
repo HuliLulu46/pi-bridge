@@ -1,9 +1,9 @@
-export interface ContentBlock {
+interface ContentBlock {
   type: string;
   text?: string;
 }
 
-export interface PiMessage {
+interface PiMessage {
   role: string;
   content?: ContentBlock[] | string;
   stopReason?: string;
@@ -28,7 +28,6 @@ export interface PiEvent {
   attempt?: number;
   maxAttempts?: number;
   errorMessage?: string;
-  command?: string;
   success?: boolean;
   error?: string;
   method?: string;

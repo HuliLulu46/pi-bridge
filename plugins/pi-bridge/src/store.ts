@@ -90,16 +90,15 @@ export function writeRecord(record: SessionRecord): void {
   renameSync(tmp, path);
 }
 
-export function removeRecord(name: string): boolean {
+export function removeRecord(name: string): void {
   try {
     rmSync(recordPath(name));
   } catch (err) {
-    if (isMissing(err)) return false;
+    if (isMissing(err)) return;
     throw err;
   }
   rmSync(logPath(name), { force: true });
   rmSync(runPath(name, "err"), { force: true });
-  return true;
 }
 
 export function listRecords(): SessionRecord[] {

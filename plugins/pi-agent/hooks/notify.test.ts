@@ -126,7 +126,7 @@ test('等用户回答 pi 的提问时，别的运行完成照样通知', async (
   expect(asked).toBe(1)
   w.append({ runId: RUN2, session: 'other', type: 'done' })
   await w.clock.advance(2000)
-  // 旧写法 await 对话框时，轮询在这里停住，stat 次数不再增加
+  // 对话框未回答时，轮询仍继续执行
   expect(w.stats()).toBe(2)
   expect(w.submits.length).toBe(1)
   expect(w.submits[0]).toContain(RUN2)
@@ -135,14 +135,13 @@ test('等用户回答 pi 的提问时，别的运行完成照样通知', async (
 })
 
 test('空闲：别的会话的事件只推进游标，不读不解析，不写 store，不重画', async ($: any, on: any) => {
-  const store = new Map<string, unknown>([['cursor:s1', 0], ['recent:old', []]])
+  const store = new Map<string, unknown>([['cursor:s1', 0]])
   let sets = 0
   let invalidates = 0
   let eventReads = 0
   on('store.get', (_: any, e: any) => ({ value: store.get(e.key) }))
   on('store.set', (_: any, e: any) => { sets += 1; store.set(e.key, e.value); return { value: undefined } })
   on('store.delete', (_: any, e: any) => { store.delete(e.key); return { value: undefined } })
-  on('store.keys', () => ({ value: [...store.keys()] }))
   on('ui.invalidate', () => { invalidates += 1; return { value: undefined } })
   const clock = mock.clock(on, { now: 1_000_000 })
   on('process.hookEnv', () => ({ value: { CLAUDE_CODE_SESSION_ID: 's1' } }))
@@ -155,8 +154,6 @@ test('空闲：别的会话的事件只推进游标，不读不解析，不写 s
   on('ui.log', () => ({ value: undefined }))
   await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true })
   await clock.advance(2000)
-  // 旧版本留下的 recent:* 被清掉
-  expect(store.has('recent:old')).toBe(false)
   log += line({ runId: 'r-zzz999-aaaaaa', session: 'x', type: 'start' })
   await clock.advance(2000)
   expect(store.get('cursor:s1')).toBe(log.length)

@@ -33,7 +33,7 @@ export type DaemonMessage =
   | { type: "line"; line: string }
   /** watch 等不到新运行时，交出上一次运行的全部行 */
   | { type: "idle"; lines: string[] }
-  /** 一次运行开始，带运行编号；旧客户端不认识这个类型，会直接忽略 */
+  /** 一次运行开始，带运行编号 */
   | { type: "started"; runId: string }
   | { type: "ask"; ask: Ask; runId?: string }
   | { type: "done"; text: string; runId?: string }

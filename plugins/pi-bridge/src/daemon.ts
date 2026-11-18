@@ -72,8 +72,8 @@ const pi = spawn(
 );
 
 let busy = false;
-/** 当前（或上一次）运行的记录，写进 ~/.pi-bridge/runs/<runId>.json */
-let run: RunRecord | undefined;
+/** 当前（或上一次）运行的记录，写进 ~/.pi-bridge/runs/<runId>.json；startRun 赋值，只在运行期间读取 */
+let run!: RunRecord;
 let tracker = createRunTracker(emit, activity);
 let finishChanges = (): string => "";
 let runLines: string[] = [];
@@ -102,7 +102,6 @@ function notifyWaiters(message: DaemonMessage): void {
 }
 
 function updateRun(patch: Partial<RunRecord>): void {
-  if (!run) return;
   run = { ...run, ...patch };
   writeRun(run);
 }
@@ -121,15 +120,13 @@ function syncAskState(): void {
 function emit(line: string): void {
   runLines.push(line);
   appendFileSync(log, `${line}\n`);
-  if (run) {
-    const event = eventFromProgress(name, run.runId, line);
-    if (event) appendEvent(event);
-  }
+  const event = eventFromProgress(name, run.runId, line);
+  if (event) appendEvent(event);
   for (const socket of watchers) send(socket, { type: "line", line }, false);
 }
 
 function activity(entry: Activity): void {
-  if (run) appendActivity({ session: name, runId: run.runId, ...entry });
+  appendActivity({ session: name, runId: run.runId, ...entry });
 }
 
 function piCommand(command: Record<string, unknown>): Promise<PiEvent> {
@@ -180,19 +177,19 @@ function endRun(ok: boolean, text: string, error: string): void {
   for (const ask of pending.values()) clearTimeout(ask.timer);
   pending.clear();
   writeRecord({ ...record, updatedAt: new Date().toISOString() });
-  const runId = run?.runId;
+  const { runId } = run;
   const endedAt = new Date().toISOString();
   // 先落运行记录与事件，再通知等待者：任何人收到完成通知后读记录都读得到
   if (ok) {
     updateRun({ status: "done", endedAt, reply: text, exitCode: 0, ask: undefined });
-    if (runId) appendEvent({ session: name, runId, type: "done" });
+    appendEvent({ session: name, runId, type: "done" });
     emit("[reply]");
     emit(text);
     emit(DONE);
     notifyWaiters({ type: "done", text, runId });
   } else {
     updateRun({ status: "failed", endedAt, reply: text, error, exitCode: 1, ask: undefined });
-    if (runId) appendEvent({ session: name, runId, type: "failed", text: error });
+    appendEvent({ session: name, runId, type: "failed", text: error });
     emit("[error]");
     emit(error);
     emit(FAILED);
@@ -236,9 +233,9 @@ function onDialog(event: PiEvent): void {
   }, ASK_TIMEOUT_MS);
   pending.set(ask.id, { ...ask, timer });
   syncAskState();
-  if (run) appendEvent({ session: name, runId: run.runId, type: "ask", text: `${ask.title}`, ask });
+  appendEvent({ session: name, runId: run.runId, type: "ask", text: `${ask.title}`, ask });
   emit(formatAsk(name, ask));
-  notifyWaiters({ type: "ask", ask, runId: run?.runId });
+  notifyWaiters({ type: "ask", ask, runId: run.runId });
 }
 
 function onPiEvent(event: PiEvent): void {
@@ -279,9 +276,9 @@ async function handleRequest(socket: Socket, req: ClientRequest): Promise<void> 
       if (busy) throw new Error(`会话 ${name} 正在运行任务，补充指示用 steer（当前这轮工具执行完后送达）`);
       startRun(req.message);
       if (req.detach) {
-        send(socket, { type: "started", runId: run!.runId });
+        send(socket, { type: "started", runId: run.runId });
       } else {
-        send(socket, { type: "started", runId: run!.runId }, false);
+        send(socket, { type: "started", runId: run.runId }, false);
         waiters.add(socket);
       }
       const response = await piCommand({ type: "prompt", message: req.message });

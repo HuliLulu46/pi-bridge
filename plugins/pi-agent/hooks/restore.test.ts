@@ -17,7 +17,6 @@ function world(on: any, opts: Options = {}) {
   on('store.get', (_: any, e: any) => { keys.push(e.key); return { value: store.get(e.key) } })
   on('store.set', (_: any, e: any) => { store.set(e.key, e.value); writes.push(e.key); return { value: undefined } })
   on('store.delete', (_: any, e: any) => { store.delete(e.key); return { value: undefined } })
-  on('store.keys', () => ({ value: [...store.keys()] }))
   on('session.id', () => ({ value: tid }))
   let infos = 0
   on('session.info', () => { infos += 1; return { value: { transcriptPath: '/w/current.jsonl' } } })
@@ -54,7 +53,7 @@ const send = ($: any) => $.tool.call({ tool: 'PiAgent', session: 'restored-sessi
 const line = (value: unknown) => JSON.stringify(value)
 
 test('恢复归属：取最后一个不同的顶层 session_id，认回旧键并写当前 alias', async ($: any, on: any) => {
-  const w = world(on, { store: { 'pending:old-id': [{ runId: 'r-old123-123abc', note: '旧通知', at: 0, sentAt: 1 }] }, transcript: [
+  const w = world(on, { store: { 'pending:old-id': [{ runId: 'r-old123-123abc', note: '旧通知', sentAt: 1 }] }, transcript: [
     line({ session_id: 'earlier-id', sessionId: 'new-id' }),
     line({ session_id: 'old-id', sessionId: 'new-id' }),
     '{"session_id": broken',

@@ -69,7 +69,7 @@ test('list 缺省 scope=session：只列 owner 是本会话的（含副本、认
   expect(w.calls.at(-1)).toContain('--all')
 })
 
-test('list scope=project：交给 pi-bridge 按项目过滤，owner 列标 mine/other/-，forkOf 列标来源；旧参数 all 当 scope=all', async ($: any, on: any) => {
+test('list scope=project：交给 pi-bridge 按项目过滤，owner 列标 mine/other/-，forkOf 列标来源；scope=all 传 --all', async ($: any, on: any) => {
   const w = world(on)
   const out = await list($, { scope: 'project' })
   expect(w.calls.at(-1)).not.toContain('--all')
@@ -77,7 +77,7 @@ test('list scope=project：交给 pi-bridge 按项目过滤，owner 列标 mine/
   expect(out).toMatch(/^other-s\tother\t/m)
   expect(out).toMatch(/^free-s\t-\t/m)
   expect(out).toMatch(/^fork-s\.s1\tmine\t.*\tother-s\t/m)
-  await list($, { all: true })
+  await list($, { scope: 'all' })
   expect(w.calls.at(-1)).toContain('--all')
 })
 
@@ -110,7 +110,6 @@ test('/clear 换了 transcript id：记下别名，归属仍是原来的主会�
   on('store.get', (_: any, e: any) => ({ value: store.get(e.key) }))
   on('store.set', (_: any, e: any) => { store.set(e.key, e.value); return { value: undefined } })
   on('store.delete', (_: any, e: any) => { store.delete(e.key); return { value: undefined } })
-  on('store.keys', () => ({ value: [...store.keys()] }))
   let tid = 's1'
   on('session.id', () => ({ value: tid }))
   on('turn.start', (_: any, e: any) => ({ turnId: e.turnId }))

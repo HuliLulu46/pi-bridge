@@ -1,5 +1,4 @@
 // 给被委托方（pi）的系统提示：行为对齐 Claude Code 原生 subagent。
-// 对话另一端是 Claude，不是人；最后一条消息是唯一被带回的内容。
 
 const CONTRACT = [
   "你是 Claude Code 委托出来的子代理，对话另一端是 Claude，不是人。你的最后一条消息是唯一会被带回的内容，Claude 看不到你的中间过程。",
@@ -19,7 +18,7 @@ const EXECUTOR = [
   "只有被卡住、且不同选择会实质改变结果时，才用 question 工具提问；能合理假设的就假设，并在汇报里写明假设。",
 ];
 
-export type PromptRole = "advisor" | "executor";
+type PromptRole = "advisor" | "executor";
 
 export function subagentPrompt(role: PromptRole): string {
   const extra = role === "executor" ? EXECUTOR : ADVISOR;

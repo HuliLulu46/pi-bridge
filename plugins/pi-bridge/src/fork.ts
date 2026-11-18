@@ -1,5 +1,4 @@
-// 分出 pi 会话的副本：与 pi 的 --fork 相同（复制全部条目，新文件头换 id 并记下 parentSession），
-// 但由 bridge 在派发前同步完成，之后每次运行照常用 --session-id，print 与常驻进程两条路径都不用改
+// 分出 pi 会话的副本：与 pi 的 --fork 相同（复制全部条目，新文件头换 id 并记下 parentSession），由 bridge 在派发前同步完成
 import { randomBytes } from "node:crypto";
 import { closeSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -7,7 +6,7 @@ import { isAbsolute, join, resolve } from "node:path";
 
 const HEADER_SCAN_MAX = 1024 * 1024;
 
-export interface HistoryMessage {
+interface HistoryMessage {
   role: "user" | "assistant";
   text: string;
 }
@@ -182,24 +181,9 @@ export function forkPiSession(sourceId: string, newId: string, cwd: string): str
   const dir = piSessionDir(cwd);
   const source = findPiSession(dir, sourceId);
   if (!source) throw new Error(`找不到 pi 会话 ${sourceId} 的会话文件（${dir}），无法分出副本；请换一个新会话名`);
-  const lines = readFileSync(source, "utf8").split("\n").filter((line) => line.trim() !== "");
-  let header: { version?: number; cwd?: string } | undefined;
-  const rest: string[] = [];
-  for (const line of lines) {
-    if (header === undefined) {
-      try {
-        const entry = JSON.parse(line) as { type?: string; version?: number; cwd?: string };
-        if (entry.type === "session") {
-          header = entry;
-          continue;
-        }
-      } catch {
-        // 坏行原样保留，pi 读取时自己跳过
-      }
-    }
-    rest.push(line);
-  }
-  if (header === undefined) throw new Error(`pi 会话文件没有会话头，无法分出副本：${source}`);
+  // findPiSession 已确认首行是会话头；pi 只往文件末尾追加
+  const [first, ...rest] = readFileSync(source, "utf8").split("\n").filter((line) => line.trim() !== "");
+  const header = JSON.parse(first!) as { version?: number; cwd?: string };
   const timestamp = new Date().toISOString();
   const newHeader = { type: "session", version: header.version, id: newId, timestamp, cwd: header.cwd ?? realDir(cwd), parentSession: source };
   mkdirSync(dir, { recursive: true });

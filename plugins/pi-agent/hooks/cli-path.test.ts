@@ -1,6 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-// 经符号链接加载时，按插件目录的真实路径找兄弟目录里的 pi-bridge
 test('插件目录是符号链接：按 realPath 找 ../pi-bridge/src/cli.ts', async ($: any, on: any) => {
   const CLI = '/repo/plugins/pi-agent/../pi-bridge/src/cli.ts'
   mock.store(on, {})
