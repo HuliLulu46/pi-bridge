@@ -57,6 +57,7 @@ Claude 能根据你的意图回答的直接回答，拿不准的再问你；`pi-
 ### 5. 隔离运行与进度跟随
 
 - `--worktree`：创建会话时加上，pi 在独立的 git worktree 和分支 `pi/<会话名>` 中工作，可以和 Claude 并行改同一个仓库，完成后整体验收再合并。
+- `send <新会话名> --history-file <绝对路径> <消息|->`：首次运行前导入另一个 agent 的对话历史，支持 advisor、executor、`--detach` 和 `--worktree`。文件是 UTF-8 JSON：`{"messages":[{"role":"user","text":"之前的问题"},{"role":"assistant","text":"之前的回答"}]}`，`messages` 必须非空，每条 `role` 只能是 `user` 或 `assistant`，`text` 必须是字符串。调用方先合并连续同角色消息，并保证第一条为 user。本次消息仍可用 `-` 从 stdin 读取。已有 bridge 记录、残留 pi 历史或属于其他 owner 的同名会话一律拒绝，不覆盖、不重复导入；不指定 `--model` 时使用默认模型。
 - `pi-bridge watch <会话名>`：每次工具调用输出一行进度，可以交给 Claude Code 的 Monitor 实时跟随。
 
 ## 为什么不直接在 Bash 里调用 pi

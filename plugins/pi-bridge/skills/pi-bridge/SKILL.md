@@ -21,7 +21,7 @@ description: 通过 pi-bridge 命令把任务交给 pi coding agent：以只读�
 
 | 命令 | 作用 |
 |---|---|
-| `pi-bridge send <会话名> [--role advisor\|executor] [--cwd <目录>] [--model <模型>] [--thinking <等级>] [--worktree] <消息\|->` | 发送一条消息并等待回复；会话不存在时创建 |
+| `pi-bridge send <会话名> [--role advisor\|executor] [--cwd <目录>] [--model <模型>] [--thinking <等级>] [--worktree] [--history-file <绝对路径>] <消息\|->` | 发送一条消息并等待回复；会话不存在时创建 |
 | `pi-bridge review [--staged \| --base <分支>] [--cwd <目录>] [--focus <关注点>] [--model <模型>] [--thinking <等级>]` | 以只读方式评审当前改动，见“让 pi 评审” |
 | `pi-bridge watch <会话名>` | 跟随该会话正在进行的运行 |
 | `pi-bridge list [--all \| --here] [--active]` | 列出会话：名字、状态（idle / running / daemon）、更新时间、目录、session-id；worktree 会话另附 `分支@base`。默认只列当前项目（git 主仓库根；worktree 会话与主仓库算同一项目），`--all` 列全部项目，`--active` 只列 running/daemon |
@@ -93,6 +93,7 @@ watch 输出的行格式：`[start]` 本次消息摘要、`[tool]` 工具调用�
 - 同一件事的多轮对话复用同一个会话名，pi 记得之前的内容，后续消息不必重复背景。不同任务用不同会话名。
 - 会话名只能包含字母、数字和 `. _ -`，首尾必须是字母或数字。
 - 工作目录在首次 `send` 时绑定（默认为当前目录），之后在哪里调用都在该目录运行；传入不同的 `--cwd` 会报错。要换目录就换一个会话名。
+- `send <新会话名> --history-file <绝对路径> <消息|->`：首次运行前导入对话历史，文件为 UTF-8 JSON `{"messages":[{"role":"user","text":"之前的问题"},{"role":"assistant","text":"之前的回答"}]}`。`messages` 必须非空，每条 `role` 只能为 `user` 或 `assistant`，`text` 为字符串；调用方保证第一条为 user、连续同角色消息已合并。本次消息仍由位置参数或 stdin 提供。支持 advisor、executor、`--detach`、`--worktree`；不指定 `--model` 时使用默认模型。已有 bridge 记录、残留 pi 会话文件、属于其他 owner 的同名会话均报错“fork 只能用于新的会话名”，不会自动分副本或重复导入；`rm` 后仍有 pi 历史的名字也不能用于导入。
 - 角色每次 `send` 单独指定，不写就是 advisor：
   - executor 会话的后续消息同样要写 `--role executor`。漏写时，常驻进程还在则报错，补上即可；常驻进程已空闲退出则本轮以只读方式运行，pi 会说明无法修改。
   - 从 executor 切到 advisor 前先 `stop`。

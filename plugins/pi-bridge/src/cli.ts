@@ -10,7 +10,7 @@ import { ADVISOR_ARGS, modelArgs, runPi, type Role } from "./pi.ts";
 import { subagentPrompt } from "./prompts.ts";
 import { preview, toolNotice } from "./events.ts";
 import { createWorktree, projectIdentity, removeWorktree, rollbackError, type RepoIdentity, type ReviewScope } from "./git.ts";
-import { forkPiSession } from "./fork.ts";
+import { forkPiSession, importPiHistory, readHistoryFile } from "./fork.ts";
 import { prepareReview } from "./review.ts";
 import {
   appendEvent,
@@ -42,7 +42,7 @@ import {
 } from "./store.ts";
 
 const USAGE = `用法：
-  pi-bridge send <会话名> [--role advisor|executor] [--cwd <目录>] [--model <模型>] [--thinking <等级>] [--worktree] <消息|->
+  pi-bridge send <会话名> [--role advisor|executor] [--cwd <目录>] [--model <模型>] [--thinking <等级>] [--worktree] [--history-file <绝对路径>] <消息|->
   pi-bridge watch <会话名>
   pi-bridge list [--all | --here] [--active] [--json]
   pi-bridge rm <会话名> [--force]
@@ -66,6 +66,7 @@ send / answer / review 加 --detach 立即返回 {"session","runId"}（隐含 --
 对方正在运行或会话带 worktree 时拒绝；steer、answer、abort、stop 只作用于本主会话的会话或副本。steer、abort、stop 加 --json 输出一行 JSON
 
 消息写 - 时从 stdin 读取。首次 send 创建会话并绑定 cwd（默认当前目录），之后固定在该目录运行。
+--history-file 从 JSON {"messages":[{"role":"user","text":"..."}]} 导入历史，role 允许 user 或 assistant，只允许用于全新会话名。
 --role 缺省为 advisor：只读，跑完即退出。
 executor 在常驻进程中运行，没有常驻进程时自动启动，空闲 30 分钟自动退出；
 pi 提问时 send 打印提问并以退出码 2 退出，用 answer 回答后继续等待。会话有常驻进程时，先 stop 才能以 advisor 发送。
@@ -126,26 +127,27 @@ function ensureRecord(
   cwdOption: string | undefined,
   worktree: boolean,
   owner?: string,
+  historyFile?: string,
 ): { record: SessionRecord; isNew: boolean } {
   const existing = readRecord(name);
+  if (existing && historyFile !== undefined) throw new Error("fork 只能用于新的会话名：bridge 会话记录已存在");
   if (existing && worktree) throw new Error(`会话 ${name} 已存在，worktree 只能在创建会话时指定`);
   const cwd = resolve(cwdOption ?? existing?.cwd ?? process.cwd());
   if (existing && existing.cwd !== cwd) throw new Error(`会话 ${name} 绑定在 ${existing.cwd}，不能改到 ${cwd}`);
   if (existing) return { record: existing, isNew: false };
   if (!existsSync(cwd)) throw new Error(`目录不存在：${cwd}`);
+  const history = historyFile !== undefined ? readHistoryFile(historyFile) : undefined;
   const now = new Date().toISOString();
   const base = { name, createdAt: now, updatedAt: now, ...(owner !== undefined ? { owner } : {}) };
-  if (!worktree) {
-    const record = { ...base, cwd };
-    writeRecord(record);
-    return { record, isNew: true };
-  }
-  const created = createWorktree(cwd, name);
-  const record = { ...base, cwd: created.path, worktree: created.info };
+  const created = worktree ? createWorktree(cwd, name) : undefined;
+  const record = created ? { ...base, cwd: created.path, worktree: created.info } : { ...base, cwd };
+  let imported: string | undefined;
   try {
+    if (history) imported = importPiHistory(history, sessionIdOf(record), record.cwd);
     writeRecord(record);
   } catch (err) {
-    throw rollbackError(err, created.rollback());
+    if (imported) rmSync(imported, { force: true });
+    throw created ? rollbackError(err, created.rollback()) : err;
   }
   return { record, isNew: true };
 }
@@ -254,6 +256,7 @@ function takeFlags(argv: string[]): { owner?: string; json: boolean; rest: strin
 
 interface SendOptions {
   cwd?: string;
+  historyFile?: string;
   model?: string;
   thinking?: string;
   worktree: boolean;
@@ -273,6 +276,7 @@ async function send(argv: string[]): Promise<number> {
     options: {
       role: { type: "string", default: "advisor" },
       cwd: { type: "string" },
+      "history-file": { type: "string" },
       model: { type: "string" },
       thinking: { type: "string" },
       worktree: { type: "boolean" },
@@ -289,11 +293,14 @@ async function send(argv: string[]): Promise<number> {
     throw new Error(`--role 只能是 advisor 或 executor：${role}`);
   }
   const owner = values.owner;
-  // 属于别的主会话时改用（必要时分出）本主会话的副本
-  const name = resolveOwned(requested, owner, "send");
+  const historyFile = values["history-file"];
+  // 导入历史不能认领已有记录，也不能触发 owner 副本的创建。
+  if (historyFile !== undefined && readRecord(requested)) throw new Error("fork 只能用于新的会话名：bridge 会话记录已存在");
+  const name = historyFile !== undefined ? requested : resolveOwned(requested, owner, "send");
   const message = await readMessage(raw);
   const opts: SendOptions = {
     cwd: values.cwd,
+    historyFile,
     model: values.model,
     thinking: values.thinking,
     worktree: values.worktree ?? false,
@@ -312,6 +319,7 @@ async function send(argv: string[]): Promise<number> {
       ...(values.model ? ["--model", values.model] : []),
       ...(values.thinking ? ["--thinking", values.thinking] : []),
       ...(opts.worktree ? ["--worktree"] : []),
+      ...(historyFile !== undefined ? ["--history-file", historyFile] : []),
       ...(owner !== undefined ? ["--owner", owner] : []),
       "--json",
       "-",
@@ -329,7 +337,7 @@ async function sendPrint(name: string, message: string, opts: SendOptions): Prom
   }
   const release = acquireLock(name);
   try {
-    const { record, isNew } = ensureRecord(name, opts.cwd, opts.worktree, opts.owner);
+    const { record, isNew } = ensureRecord(name, opts.cwd, opts.worktree, opts.owner, opts.historyFile);
     return await runPrint(record, isNew, message, { model: opts.model, thinking: opts.thinking, json: opts.json });
   } finally {
     release();
@@ -484,7 +492,9 @@ async function sendExecutor(name: string, message: string, opts: SendOptions): P
   if (daemon) {
     const record = readRecord(name);
     const boundCwd = record?.cwd;
-    const conflict = opts.worktree
+    const conflict = opts.historyFile !== undefined
+      ? "fork 只能用于新的会话名：会话已有常驻进程"
+      : opts.worktree
       ? `会话 ${name} 已存在，worktree 只能在创建会话时指定`
       : opts.cwd && resolve(opts.cwd) !== boundCwd
         ? `会话 ${name} 绑定在 ${boundCwd}，不能改到 ${resolve(opts.cwd)}`
@@ -522,7 +532,7 @@ async function startDaemon(name: string, opts: SendOptions): Promise<Socket> {
   const release = acquireLock(name);
   let ensured: ReturnType<typeof ensureRecord>;
   try {
-    ensured = ensureRecord(name, opts.cwd, opts.worktree, opts.owner);
+    ensured = ensureRecord(name, opts.cwd, opts.worktree, opts.owner, opts.historyFile);
   } finally {
     release();
   }

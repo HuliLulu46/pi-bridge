@@ -1,9 +1,20 @@
 #!/usr/bin/env node
 // 模拟 pi：`-p --mode json` 按消息内容决定行为，`--mode rpc` 交给 fake-pi-rpc.mjs
-import { appendFileSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 const argv = process.argv.slice(2);
 appendFileSync(process.env.FAKE_PI_CALLS, JSON.stringify({ argv, cwd: process.cwd(), subagent: process.env.PI_CODE_SUBAGENT }) + "\n");
+
+if (process.env.FAKE_PI_EXPECT_HISTORY) {
+  const id = argv[argv.indexOf("--session-id") + 1];
+  const dir = process.env.PI_CODING_AGENT_SESSION_DIR;
+  const histories = readdirSync(dir).filter((name) => name.endsWith(".jsonl"))
+    .map((name) => readFileSync(join(dir, name), "utf8"))
+    .filter((text) => JSON.parse(text.split("\n")[0]).id === id);
+  if (histories.length !== 1) throw new Error(`启动时应有唯一的历史文件：${id}`);
+  writeFileSync(`${process.env.FAKE_PI_CALLS}.history.jsonl`, histories[0]);
+}
 
 if (argv[argv.indexOf("--mode") + 1] === "rpc") {
   await import("./fake-pi-rpc.mjs");
