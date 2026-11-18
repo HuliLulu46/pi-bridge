@@ -1,8 +1,17 @@
-# agent-bridge
+# pi-bridge
 
-Claude Code plugin marketplace，目前提供一个 plugin：**`pi-bridge`**。它让 Claude Code 把 [pi](https://github.com/earendil-works/pi) coding agent 当成第二个大脑来用：pi 可以背后跑另一家的模型，以只读顾问的身份给方案和代码提意见，也可以以执行者的身份接手编码任务。Claude 始终是主控，负责拆任务、回答 pi 的提问、核实 pi 的结论。
+[English](README.md) | 简体中文
 
-日常使用不需要手敲命令。在 Claude Code 里说“问问 pi 这个方案”“交给 pi 改”“让 pi 评审一下”，`pi-bridge` skill 会让 Claude 选好角色、在后台运行、读结果，并逐条核实后再汇报给你。
+在 [Claude Code](https://claude.com/claude-code) 里把 [pi](https://github.com/earendil-works/pi) coding agent 当作第二个大脑来用。pi 可以背后跑另一家的模型：以只读顾问的身份给方案和代码提意见，或以执行者的身份接手编码任务。Claude 始终是主控，负责拆任务、回答 pi 的提问、核实 pi 的结论。
+
+这个仓库是一个 Claude Code plugin marketplace，包含两个插件：
+
+| 插件 | 做什么 | 是否必装 |
+|---|---|---|
+| `pi-bridge` | `pi-bridge` 命令行、常驻进程、`pi-bridge` skill 和 `/pi-review` 命令。Claude 通过 Bash 调用 pi | 必装 |
+| `pi-agent` | 一个 Claude Code mod：提供 `PiAgent` 工具，派发后立即返回、完成时自动唤醒 Claude；pi 的提问弹出原生对话框；运行中的任务显示在输入框上方，`/pi` 打开任务面板 | 可选，依赖 `pi-bridge` |
+
+日常使用不需要手敲命令。在 Claude Code 里说“问问 pi 这个方案”“交给 pi 改”“让 pi 评审一下”，Claude 会选好角色、在后台运行、读结果，并逐条核实后再汇报给你。
 
 ## 能做什么
 
@@ -67,7 +76,7 @@ Claude 能根据你的意图回答的直接回答，拿不准的再问你；`pi-
 | 直接调用会遇到的问题 | pi-bridge 的处理 |
 |---|---|
 | pi 中途提问需要一个长期运行、标准输入一直开着的进程，而 Claude 每次调用 Bash 都是一条独立的命令，`pi -p` 遇到要提问的情况只能放弃 | 常驻进程托管 pi，Claude 的每条命令通过 unix socket 与它通信，所以能提问、插话、中止 |
-| 装了 pi-code 等扩展时，pi 会加载 Claude 的全部 skill，被 brainstorming、tdd 之类的流程带偏；`--no-skills` 关不掉这些 skill | 顾问用 `--no-extensions` 加只读工具白名单，彻底隔离，也保证只读 |
+| 装了 [pi-code](https://github.com/ilovepixelart/pi-code) 等扩展时，pi 会加载 Claude 的全部 skill，被 brainstorming、tdd 之类的流程带偏；`--no-skills` 关不掉这些 skill | 顾问用 `--no-extensions` 加只读工具白名单，彻底隔离，也保证只读 |
 | 完整环境的 pi 会读写 pi-code 的记忆、触发会话级 hook | 执行者统一设置 `PI_CODE_SUBAGENT=1`，关掉这些副作用 |
 | 在错误的目录下用 `--session-id` 续接，pi 只打一行警告就新建一个空会话，之前的上下文悄悄丢了 | 会话名首次使用时绑定工作目录，之后在哪里调用都回到同一个会话 |
 | 两个 pi 进程可以同时写同一个会话文件 | 会话锁；常驻进程在运行时，拒绝以顾问身份发消息 |
@@ -76,42 +85,67 @@ Claude 能根据你的意图回答的直接回答，拿不准的再问你；`pi-
 
 这些规则写在 SKILL.md 里让 Claude 每次手动照做也行，但规则多、漏一条也不会报错；写成代码则每次都能做对。
 
+## PiAgent（pi-agent 插件）
+
+只装 `pi-bridge` 时，Claude 通过 Bash 运行 `pi-bridge send`，要么等它跑完，要么自己轮询。装上 `pi-agent` 后，Claude 多了一个原生工具 `PiAgent`，用法和内置的 Agent 工具一样：
+
+- `send` / `review` 立即返回 runId，任务在后台运行；完成或失败时，mod 往主会话送一条通知，Claude 被唤醒后读结果、核实、汇报。
+- pi 中途提问时，弹出 Claude Code 的原生选择对话框，由你直接回答。
+- 运行中的任务显示在输入框上方；`/pi` 打开面板，可以查看进度、插话（steer）、中止。
+- `fork=true` 时 pi 继承当前对话的上下文，不必在消息里重复背景。
+- 会话按 Claude Code 主会话归属：`/clear` 或恢复会话后仍认得自己派出的任务；别的主会话用了同名会话时，自动派到本会话的副本。
+
+> 目前 `PiAgent` 注入给模型的说明和工具描述是中文。
+
 ## 运行要求
 
+- Claude Code（2.1.327 测试通过；`pi-agent` 需要支持 hooks module 的版本）
 - Node.js 22.18 或更高（直接运行 `.ts` 源码，依赖 Node 的类型擦除）
-- 已安装 `pi`，且在 PATH 中
+- 已安装 [pi](https://github.com/earendil-works/pi)，且 `pi` 在 PATH 中
 
 ## 安装
 
-```bash
-claude plugin marketplace add /path/to/agent-bridge
-claude plugin install pi-bridge@agent-bridge
+在 Claude Code 里执行：
+
+```
+/plugin marketplace add HuliLulu46/pi-bridge
+/plugin install pi-bridge@pi-bridge
+/plugin install pi-agent@pi-bridge
 ```
 
-安装时 plugin 目录会被复制到 `~/.claude/plugins/cache/`，以 git 提交号作为版本。已打开的会话执行 `/reload-plugins` 或重启后生效。
-
-## 更新
-
-提交改动后执行：
+或在终端里：
 
 ```bash
-claude plugin marketplace update agent-bridge
-claude plugin update pi-bridge@agent-bridge
+claude plugin marketplace add HuliLulu46/pi-bridge
+claude plugin install pi-bridge@pi-bridge
+claude plugin install pi-agent@pi-bridge   # 可选
 ```
 
-未提交的改动不会产生新版本。开发时可以用 `claude --plugin-dir plugins/pi-bridge` 直接从源码目录加载。
+已打开的会话执行 `/reload-plugins` 或重启后生效。`pi-agent` 按版本目录查找同一 marketplace 里的 `pi-bridge`，两个插件请一起更新：
+
+```bash
+claude plugin marketplace update pi-bridge
+claude plugin update pi-bridge@pi-bridge
+claude plugin update pi-agent@pi-bridge
+```
 
 ## 目录
 
 ```
 .claude-plugin/marketplace.json   marketplace 清单
-plugins/pi-bridge/                plugin 本体（安装时只复制这个目录）
-  .claude-plugin/plugin.json
+plugins/pi-bridge/                pi-bridge 插件
   bin/pi-bridge                   加入 PATH 的命令
   commands/pi-review.md           /pi-review 斜杠命令
   skills/pi-bridge/SKILL.md       指导 Claude 何时、如何把任务交给 pi
   src/                            TypeScript 源码
-test/                             测试（pnpm test）
+plugins/pi-agent/                 pi-agent 插件（Claude Code mod）
+  hooks/register.tsx              PiAgent 工具、通知、对话框与面板
+  hooks/*.test.ts(x)              mod 测试（claude plugin test）
+test/                             pi-bridge 测试（node --test）
 ```
 
-完整的命令说明与使用规则见 [SKILL.md](plugins/pi-bridge/skills/pi-bridge/SKILL.md)。
+完整的命令说明与使用规则见 [SKILL.md](plugins/pi-bridge/skills/pi-bridge/SKILL.md)。参与开发见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
+## 许可证
+
+[MIT](LICENSE)
