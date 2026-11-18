@@ -118,7 +118,7 @@ test('send fork=true：读取主会话 API 历史，写 JSON 并传 --history-fi
   expect(call.stdin).toBe('继续完成上面的修复')
   const history = JSON.parse(w.files.get(path)!)
   expect(history).toEqual({ messages: renderHistory([user('主会话背景'), assistant([{ type: 'text', text: '已有结论' }])]) })
-  expect(String(r.result)).toContain('已 fork 当前对话（2 条消息）')
+  expect(String(r.result)).toContain('Forked the current conversation (2 messages)')
 })
 
 test('send fork=true：读取结果包含本次 tool_use 时按实际事件 id 排除', {
@@ -143,7 +143,7 @@ test('send fork=true：子 agent 只读取调用方 agentId 的历史', async ($
   const r = await $.tool.call({ tool: 'PiAgent', session: 'child', message: '继续', fork: true, agentId: 'agent-1' })
   expect(w.reads).toEqual([{ agentId: 'agent-1', as: 'api' }])
   expect([...w.files.values()][0]).toContain('子 agent 背景')
-  expect(String(r.result)).toContain('已 fork 当前对话')
+  expect(String(r.result)).toContain('Forked the current conversation')
 })
 
 test('send fork=true：messages deny 时返回原因，不写文件也不派发', async ($: any, on: any) => {
@@ -160,7 +160,7 @@ test('普通 send 不读取历史、不传 --history-file', async ($: any, on: a
   expect(w.reads.length).toBe(0)
   expect(w.files.size).toBe(0)
   expect(w.calls[0]!.args).not.toContain('--history-file')
-  expect(String(r.result)).not.toContain('已 fork 当前对话')
+  expect(String(r.result)).not.toContain('Forked the current conversation')
 })
 
 test('send fork=true：bridge 拒绝已有 session 时原样返回错误', async ($: any, on: any) => {

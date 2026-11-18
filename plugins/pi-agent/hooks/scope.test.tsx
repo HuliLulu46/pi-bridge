@@ -85,10 +85,10 @@ test('send 带 --owner；被改派到副本时结果里说明', async ($: any, o
   const w = world(on)
   const mine = await call($, { action: 'send', session: 'mine-s', message: 'hi' })
   expect(w.calls.at(-1)).toEqual(expect.arrayContaining(['--owner', 's1']))
-  expect(mine).not.toContain('副本')
+  expect(mine).not.toContain('fork')
   const other = await call($, { action: 'send', session: 'other-s', message: 'hi' })
   expect(other).toContain('other-s.s1')
-  expect(other).toContain('属于另一个主会话')
+  expect(other).toContain('belongs to another main session')
 })
 
 test('面板已完成页：只显示 owner 是本会话的 pi 会话的运行', async ($: any, on: any) => {

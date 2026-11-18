@@ -71,7 +71,7 @@ test('恢复归属：取最后一个不同的顶层 session_id，认回旧键并
   expect(w.envReads()).toBe(0)
   const out = await $.tool.call({ tool: 'PiAgent', action: 'list' })
   expect(String(out.result)).toContain('restored-session')
-  await $.turn.start({ text: '[pi mod 通知] r-old123-123abc 已完成', turnId: 't1' })
+  await $.turn.start({ text: '[pi mod notice] r-old123-123abc done', turnId: 't1' })
   expect(w.keys).toContain('pending:old-id')
   expect(w.store.has('pending:old-id')).toBe(false)
   expect(w.reads()).toBe(1)

@@ -93,7 +93,7 @@ With only `pi-bridge`, Claude runs `pi-bridge send` through Bash and either wait
 - `fork=true` lets pi inherit the current conversation.
 - Sessions belong to the Claude Code session that started them, across `/clear` and resume; a name owned by another main session is forked into a copy automatically.
 
-> The instructions and tool description `PiAgent` gives the model are currently in Chinese.
+> The UI is in English; the instructions and tool description `PiAgent` gives the model are currently in Chinese.
 
 ## Requirements
 

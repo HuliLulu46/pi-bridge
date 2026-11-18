@@ -31,7 +31,7 @@ test('running tab draws list and detail', async ($, on) => {
   console.log('DETAIL', detail?.text)
   const stop = await ui.find({ type: 'Button', key: 'stop-btn' })
   console.log('STOPBTN', !!stop)
-  const last = await ui.find({ type: 'Text', text: /最近/ })
+  const last = await ui.find({ type: 'Text', text: /Recent/ })
   console.log('LAST', last?.text)
   expect(last).toBeTruthy()
   expect(await ui.find({ type: 'Button', key: 'stop-btn' })).toBeFalsy()

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1
+
+- PiAgent UI text is now English: the status line above the prompt, the `/pi` pane, toasts, question dialogs, tool results and completion notices. The instructions given to the model are unchanged.
+
 ## 0.3.0
 
 First public release.
