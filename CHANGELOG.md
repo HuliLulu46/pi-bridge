@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.1
+
+- Fixed: `steer`, `abort` and `stop` given `--owner` with no value now fail instead of silently skipping the session ownership check.
+
 ## 0.4.0
 
 - New sessions and owner forks get their own pi session-id, `<name>-<6 random chars>`, so reusing a name after `pi-bridge rm` starts a fresh pi session instead of resuming the old history. Existing sessions keep their id.
