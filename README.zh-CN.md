@@ -93,11 +93,19 @@ Claude 能根据你的意图回答的直接回答，拿不准的再问你；`pi-
 
 - `send` / `review` 立即返回 runId，任务在后台运行；完成或失败时，mod 往主会话送一条通知，Claude 被唤醒后读结果、核实、汇报。
 - pi 中途提问时，弹出 Claude Code 的原生选择对话框，由你直接回答。
-- 运行中的任务显示在输入框上方；`/pi` 打开面板，可以查看进度、插话（steer）、中止。
+- 运行中的任务显示在输入框上方；`/pi` 打开面板，可以查看进度、中止。
 - `fork=true` 时 pi 继承当前对话的上下文，不必在消息里重复背景。
 - 会话按 Claude Code 主会话归属：`/clear` 或恢复会话后仍认得自己派出的任务；别的主会话用了同名会话时，自动派到本会话的副本。
 
 ![运行中的 /pi 面板](docs/images/02-pane-running.png)
+
+`/pi` 面板的按键：键盘焦点始终在列表里：`↑` / `↓` 在各行之间移动（到第一行、最后一行就停住），`Enter` 打开任务。按 `r`（Running）或 `f`（Finished）切换标签，标签名旁边会显示这两个字母。任务详情页里 `Esc` 回列表，`x` 中止运行中的任务，`1`–`4` 回答 pi 的提问；在列表页按 `Esc` 才关闭面板。Claude Code 不会把 `←` `→` 交给 mod，所以标签用字母切换。
+
+Claude Code 不会把 `←` `→` 交给 mod。输入框为空时，面板里按 `←` 会漏给输入框，把当前会话转入后台并打开 agents 视图。想挡住的话，在 `~/.claude/keybindings.json` 的 `bindings` 数组里加一项，让面板吃掉这两个键：
+
+```json
+{ "context": "Pane", "bindings": { "left": "pane:top", "right": "pane:bottom" } }
+```
 
 ![Claude 收到的完成通知](docs/images/03-completion-notice.png)
 

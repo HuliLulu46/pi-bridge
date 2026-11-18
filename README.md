@@ -91,11 +91,19 @@ With only `pi-bridge`, Claude runs `pi-bridge send` through Bash and either wait
 
 - `send` / `review` return a runId immediately and the task runs in the background; on completion or failure the mod posts a notice to the main session, and Claude wakes up, verifies and reports.
 - pi's questions appear as Claude Code's native choice dialog, answered by you.
-- Running tasks show above the prompt; `/pi` opens a pane to watch progress, steer or abort.
+- Running tasks show above the prompt; `/pi` opens a pane to watch progress or abort.
 - `fork=true` lets pi inherit the current conversation.
 - Sessions belong to the Claude Code session that started them, across `/clear` and resume; a name owned by another main session is forked into a copy automatically.
 
 ![PiAgent pane while a review runs](docs/images/02-pane-running.png)
+
+Keys in the `/pi` pane: keyboard focus stays on the list: `↑` / `↓` move between rows (and stop at the first and last row), `Enter` opens a task. Press `r` (Running) or `f` (Finished) to switch tabs; they are shown next to the tab names. On a task's page, `Esc` goes back to the list, `x` aborts a running task and `1`–`4` answer pi's question; `Esc` on the list closes the pane. Claude Code does not report `←` / `→` to mods, which is why the tabs use letters.
+
+Claude Code does not pass `←` and `→` to mods. With an empty prompt, `←` pressed in the pane falls through to the prompt, which moves the session to the background and opens the agents view. To stop that, add an entry to the `bindings` array in `~/.claude/keybindings.json` so the pane swallows both keys:
+
+```json
+{ "context": "Pane", "bindings": { "left": "pane:top", "right": "pane:bottom" } }
+```
 
 ![Completion notice delivered to Claude](docs/images/03-completion-notice.png)
 

@@ -23,8 +23,10 @@ const ABORT_GRACE_MS = 30_000
 const PANE = 'pi'
 const RECENT_MAX = 8
 // 面板的界面状态：只在模块里，改了就 invalidate；打开面板时重置
+type Tab = 'running' | 'done'
 // text / events 是已完成任务详情页的内容，loading 是已经发起加载的 runId；events 为 undefined 表示还没读完
-const view: { sel?: string; tab?: 'running' | 'done'; mode: 'list' | 'detail' | 'steer'; text?: string; events?: Json[]; loading?: string } = { mode: 'list' }
+// rows：当前列表各行的焦点 key；focus：焦点环上一次落的控件（'' 是引擎自己的一站）
+const view: { sel?: string; tab?: Tab; rows: string[]; focus?: string; mode: 'list' | 'detail'; text?: string; events?: Json[]; loading?: string } = { mode: 'list', rows: [] }
 const clearDetail = () => { view.text = undefined; view.events = undefined; view.loading = undefined }
 
 const GUIDE = [
@@ -442,22 +444,10 @@ async function paneAbort($: any, runId: string, session: string) {
   await mutateRuns($, (runs) => { delete runs[runId] })
 }
 
-async function paneSteer($: any, session: string, text: string) {
-  const { code, out } = await cli($, ['steer', session, ...(await ownerArgs($)), '-'], text)
-  if (code !== 0) $.ui.toast(`Steer failed: ${typeof out === 'string' ? out : out.error}`)
-  view.mode = 'detail'
-  $.ui.invalidate('ui.render')
-}
-
 async function paneAnswer($: any, session: string, askId: string, value: string) {
   const { code, out } = await cli($, ['answer', session, askId, '--detach', ...(await ownerArgs($)), '-'], value)
   if (code !== 0) $.ui.toast(`Answer failed: ${typeof out === 'string' ? out : out.error}`)
   $.ui.invalidate('ui.render')
-}
-
-async function paneStop($: any, session: string) {
-  const { code, out } = await cli($, ['stop', session, ...(await ownerArgs($))])
-  $.ui.toast(code === 0 ? `Stopped the daemon of ${session}` : `Stop failed: ${typeof out === 'string' ? out : out.error}`)
 }
 
 // 详情页停在已完成任务上、内容还没加载时由 render 调用：加载完整回复和这次运行的全部事件。
@@ -925,6 +915,7 @@ export const register: Register = (on) => {
     view.mode = 'list'
     view.sel = undefined
     view.tab = undefined
+    view.focus = undefined
     clearDetail()
     await $.ui.open({ id: PANE, title: 'PiAgent', focus: true, closeOnEscape: true })
     return {}
@@ -968,15 +959,39 @@ export const register: Register = (on) => {
     )
   })
 
-  // 光标在列表里移动，下方缩略跟着更新（不用回车）
+  // 详情页里用户按 Esc（或点 ✕）只回列表，不关面板；列表页照常关闭
+  on('ui.close', { id: PANE }, async ($, e, next) => {
+    if (e.origin.kind !== 'person' || view.mode === 'list') return next(e)
+    view.mode = 'list'
+    clearDetail()
+    view.focus = undefined
+    $.ui.invalidate('ui.render')
+    await $.ui.open({ id: PANE, title: 'PiAgent', focus: true, closeOnEscape: true }) // Esc 同时把键盘还给了输入框，重新要回来
+    return { deny: 'Esc returns to the list' }
+  })
+
+  // 焦点环是 [tab-running, tab-done, 各行…, ✕]，键盘焦点只该落在行上：tab 靠热键 r / f 或点击切换。
+  // 引擎只说落点、不说按了哪个键，所以落到 tab 的移动一律不放行：首行 ↑、末行 ↓ 环绕时停在原地；环不在任何控件上或从 ✕ 再 Tab 时回到首行
   on('ui.focus', { requestId: PANE }, ($, e, next) => {
     const el = String(e.element ?? '')
-    if (el.startsWith('row-') && view.mode === 'list') {
-      const id = el.slice(4)
-      if (view.sel !== id) {
-        view.sel = id
-        $.ui.invalidate('ui.render')
-      }
+    if (view.mode !== 'list') return next(e)
+    if (el === '') {
+      view.focus = '' // 引擎自己的一站（关闭标记 ✕）
+      return next(e)
+    }
+    if (el === 'tab-running' || el === 'tab-done') {
+      const first = view.rows[0]
+      if (view.focus || first === undefined) return {} // 焦点在行上：首尾停住；还不在任何控件上或在 ✕：进首行
+      view.focus = first
+      view.sel = first.slice(4)
+      $.ui.invalidate('ui.render')
+      return next({ ...e, element: first })
+    }
+    view.focus = el
+    // 光标在列表里移动，下方缩略跟着更新（不用回车）
+    if (el.startsWith('row-') && view.sel !== el.slice(4)) {
+      view.sel = el.slice(4)
+      $.ui.invalidate('ui.render')
     }
     return next(e)
   })
@@ -984,7 +999,7 @@ export const register: Register = (on) => {
   // 面板两层：列表页（tab、列表、虚线、光标项的缩略）和详情页（回车进入，b 返回）。
   // 所有操作都直接调 pi-bridge，不经过模型，不写主会话。
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text, Button, Input } = $.ui.resolve(e)
+    const { Box, Text, Button } = $.ui.resolve(e)
     const now = await $.clock.now()
     const runs = Object.entries(((await $.store.get(await keyOf($, 'runs'))) ?? {}) as Runs).sort((a, b) => b[1].startedAt - a[1].startedAt)
     const recent = await readRecent($, await ownedNames($))
@@ -997,27 +1012,45 @@ export const register: Register = (on) => {
     // 详情页盯着的任务结束后会从“运行中”挪到“已完成”：跟着它切过去，别退回到别的任务。
     // 其余情况没手动切过就默认：有运行中的看运行中，否则看已完成
     const watched = view.mode === 'detail' ? rows.find((r) => r.runId === view.sel) : undefined
-    const tab = watched ? (watched.live ? 'running' : 'done') : view.tab ?? (liveRows.length > 0 ? 'running' : 'done')
+    const tab: Tab = watched ? (watched.live ? 'running' : 'done') : view.tab ?? (liveRows.length > 0 ? 'running' : 'done')
     const shown = tab === 'running' ? liveRows : doneRows
-    const goTab = (t: 'running' | 'done') => { view.tab = t; view.sel = undefined; view.mode = 'list'; $.ui.invalidate('ui.render') }
+    view.rows = shown.map((r) => `row-${r.runId}`)
+    if (!e.props.isFocused) view.focus = undefined
+    // 切 tab 后焦点环挪到新列表的首行
+    const goTab = async (t: Tab) => {
+      const first = (t === 'running' ? liveRows : doneRows)[0]
+      view.tab = t
+      view.sel = undefined
+      view.focus = undefined
+      view.mode = 'list'
+      $.ui.invalidate('ui.render')
+      if (first) await $.ui.focus({ requestId: PANE, key: `row-${first.runId}` })
+    }
+    const tabButton = (t: Tab) => {
+      const isActive = t === tab
+      const key = t === 'running' ? 'r' : 'f'
+      const label = `${t === 'running' ? 'Running' : 'Finished'} ${(t === 'running' ? liveRows : doneRows).length}`
+      return (
+        <Button key={`tab-${t}`} label={label} hotkey={key} onPress={() => goTab(t)}>
+          <Text color={isActive ? (t === 'running' ? 'success' : 'suggestion') : 'inactive'} bold={isActive} underline={isActive}>{label} </Text>
+          <Text dimColor>({key})</Text>
+        </Button>
+      )
+    }
     const tabs = (
       <Box>
-        <Text color="claude" bold>PiAgent   </Text>
-        <Button key="tab-running" label={`Running ${liveRows.length}`} hotkey="n" onPress={() => goTab('running')}>
-          <Text color={tab === 'running' ? 'success' : 'inactive'} bold={tab === 'running'} underline={tab === 'running'}>Running {liveRows.length}</Text>
-        </Button>
-        <Text dimColor>   </Text>
-        <Button key="tab-done" label={`Finished ${doneRows.length}`} hotkey="d" onPress={() => goTab('done')}>
-          <Text color={tab === 'done' ? 'suggestion' : 'inactive'} bold={tab === 'done'} underline={tab === 'done'}>Finished {doneRows.length}</Text>
-        </Button>
-        <Text dimColor>   Esc to close</Text>
+        <Text color="claude" bold>PiAgent </Text>
+        {tabButton('running')}
+        <Text> </Text>
+        {tabButton('done')}
       </Box>
     )
     if (shown.length === 0) {
       return (
         <Box flexDirection="column">
           {tabs}
-          <Text dimColor>{tab === 'running' ? 'No running tasks.' : 'No finished tasks for this session yet. Failed and aborted runs are listed here too.'}</Text>
+          <Text dimColor>{tab === 'running' ? 'No running tasks. Press f for finished.' : 'No finished tasks for this session yet. Failed and aborted runs are listed here too. Press r for running.'}</Text>
+          <Text dimColor>Esc to close</Text>
         </Box>
       )
     }
@@ -1033,19 +1066,10 @@ export const register: Register = (on) => {
     const tools = evs.filter((x) => x.type === 'tool').map((x) => toolBrief(String(x.text ?? '')))
     const ask = cur.live && cur.run.status === 'asking' ? [...evs].reverse().find((x) => x.type === 'ask')?.ask : undefined
     const feed = feedOf(cur.live ? evs : view.events ?? [])
-    const back = () => { view.mode = 'list'; clearDetail(); $.ui.invalidate('ui.render') }
+    const back = () => { view.mode = 'list'; clearDetail(); view.focus = undefined; $.ui.invalidate('ui.render') }
     if (view.mode === 'detail' && !cur.live && view.loading !== cur.runId) void paneLoad($, cur.runId)
 
-    // ---- 详情页
-    if (view.mode === 'steer' && cur.live) {
-      return (
-        <Box flexDirection="column">
-          <Text color="suggestion">Steer {cur.session} <Text dimColor>(Enter to send; delivered after the current tool step)</Text></Text>
-          <Input key="steer" autoFocus placeholder="Extra instructions…" submitLabel="Send" onSubmit={(t) => void paneSteer($, cur.session, t)} />
-          <Button key="back" label="Back" hotkey="b" onPress={() => { view.mode = 'detail'; $.ui.invalidate('ui.render') }} />
-        </Box>
-      )
-    }
+    // ---- 详情页：Esc 回列表（见 ui.close 钩子），运行中的任务用 x 中止
     if (view.mode === 'detail') {
       const head = (
         <Text wrap="truncate-end">
@@ -1066,7 +1090,7 @@ export const register: Register = (on) => {
               <Box flexDirection="column">
                 <Text color="warning" bold>? {String(ask.title || 'pi is asking')}</Text>
                 {opts.map((o, n) => (
-                  <Button key={`ask-${n}`} label={o} hotkey={String(n + 1)} onPress={() => void paneAnswer($, cur.session, ask.id, o)} />
+                  <Button key={`ask-${n}`} label={o} hotkey={String(n + 1)} plain onPress={() => void paneAnswer($, cur.session, ask.id, o)} />
                 ))}
               </Box>
             )}
@@ -1074,13 +1098,8 @@ export const register: Register = (on) => {
               ? feedView({ Box, Text }, feed, 10, cur.run.status === 'running' ? { now, lastAt: Date.parse(evs.at(-1)?.ts) || now } : undefined)
               : <Text dimColor>Waiting for pi to start…</Text>}
             <Box>
-              <Button key="back" label="Back" hotkey="b" onPress={back} />
-              <Text>  </Text>
-              <Button key="steer-btn" label="Steer" hotkey="s" onPress={() => { view.mode = 'steer'; $.ui.invalidate('ui.render') }} />
-              <Text>  </Text>
-              <Button key="abort-btn" label="Abort" hotkey="a" onPress={() => void paneAbort($, cur.runId, cur.session)} />
-              <Text>  </Text>
-              <Button key="stop-btn" label="Stop daemon" hotkey="x" onPress={() => void paneStop($, cur.session)} />
+              <Button key="abort-btn" label="Abort" hotkey="x" plain onPress={() => { void paneAbort($, cur.runId, cur.session); back() }} />
+              <Text dimColor>   Esc back</Text>
             </Box>
           </Box>
         )
@@ -1098,7 +1117,7 @@ export const register: Register = (on) => {
           {head}
           {activity}
           <Text>{view.text ?? 'Loading…'}</Text>
-          <Button key="back" label="Back" hotkey="b" onPress={back} />
+          <Text dimColor>Esc back</Text>
         </Box>
       )
     }
@@ -1110,7 +1129,7 @@ export const register: Register = (on) => {
       const tail = row.live ? `${row.run.role}${how(row.run)}` : row.recent.head
       const time = row.live ? (row.run.status === 'asking' ? 'waiting for you' : elapsed(now - row.run.startedAt)) : ''
       return (
-        <Button key={`row-${row.runId}`} label={`${row.session} ${tail}`} onPress={() => {
+        <Button key={`row-${row.runId}`} label={`${row.session} ${tail}`} {...(row.runId === cur.runId ? { autoFocus: true as const } : {})} onPress={() => {
           view.sel = row.runId
           view.mode = 'detail'
           clearDetail()
@@ -1132,7 +1151,6 @@ export const register: Register = (on) => {
     ) : (
       <Box flexDirection="column">
         <Text wrap="truncate-end"><Text color={curColor}>{cur.recent.status === 'done' ? 'done' : cur.recent.status === 'aborted' ? 'aborted' : 'failed'}</Text><Text dimColor> · </Text><Text>{cur.recent.head}</Text></Text>
-        <Text dimColor>Enter for the full reply</Text>
       </Box>
     )
     return (
@@ -1141,6 +1159,7 @@ export const register: Register = (on) => {
         {list}
         <Text color="subtle">╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌</Text>
         {preview}
+        <Text dimColor>↑↓ move · Enter open · Esc close</Text>
       </Box>
     )
   })

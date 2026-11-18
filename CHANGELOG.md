@@ -6,6 +6,8 @@
 - The `/pi` pane detail page now shows an activity feed: a timeline of what pi is doing (pi's notes, tool calls with their arguments and durations, tool errors, retries, steers, questions). For a running task the tools still running are marked as the current action with how long they have run (kept in view even when many tools ran after them), or "thinking" when no tool is running; a finished task shows its feed above the reply. Runs from older pi-bridge versions fall back to the global event log.
 - Tool arguments in the pane are now readable even when the logged call was truncated (long `bash` commands, `grep` patterns).
 - Fixed: a detail page left open on a running task no longer sticks on "Loading…" (or jumps to another task) when that task finishes; it follows the task to the Finished tab and loads its reply.
+- `/pi` pane: keyboard focus stays on the list (`↑` / `↓` stop at the first and last row); switch tabs with `r` / `f`, shown next to the tab names. The pane opens with the first row focused. On a task's page `Esc` returns to the list, `x` aborts and `1`–`4` answer pi's question. The pane no longer offers Steer or Stop daemon (the `PiAgent` tool still has `steer` and `stop`).
+- README: a `~/.claude/keybindings.json` entry that keeps `←` / `→` in the pane from falling through to the prompt (which opens the agents view).
 
 ## 0.3.2
 

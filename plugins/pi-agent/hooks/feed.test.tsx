@@ -96,7 +96,7 @@ test('运行中详情：显示按时间排列的动作流，最后一条标为�
   // 最后一条事件在 14s，现在是 20s：当前动作已持续 6s
   expect(await ui.find({ type: 'Text', text: /▸/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /^\s*6s$/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Button', key: 'steer-btn' })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', key: 'abort-btn' })).toBeTruthy()
   await ui.unmount()
 })
 
@@ -212,7 +212,7 @@ test('盯着运行中的任务看它跑完：详情页自动加载回复和动�
   handoffWorld(on, phase, T0 + 20000)
   const first = await $.ui.mount(PANE)
   await first.press({ key: `row-${R1}` })
-  expect(await first.find({ type: 'Button', key: 'steer-btn' })).toBeTruthy()
+  expect(await first.find({ type: 'Button', key: 'abort-btn' })).toBeTruthy()
   await first.unmount()
   // view 是模块级状态：重新挂载等于“任务结束后的下一次重画”，仍停在详情页、选中同一个任务
   phase.done = true
