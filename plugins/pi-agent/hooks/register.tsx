@@ -85,7 +85,9 @@ const PI_TOOL = {
 let cliPath: string | undefined
 async function cliOf($: any): Promise<string> {
   if (cliPath) return cliPath
-  const root: string = $.plugin.root
+  // 经符号链接加载（如 ~/.claude/mods/pi-agent）时 $.plugin.root 是链接本身，兄弟目录要按真实路径找
+  const linked: string = $.plugin.root
+  const root: string = (await $.fs.stat(linked, { resolve: true }).catch(() => undefined))?.realPath ?? linked
   const version = root.split('/').at(-1)
   const candidates = [`${root}/../pi-bridge/src/cli.ts`, `${root}/../../pi-bridge/${version}/src/cli.ts`]
   for (const path of candidates) {
