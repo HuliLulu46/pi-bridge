@@ -2,7 +2,6 @@ import type { Register } from 'claude-code'
 
 // pi-bridge 的前端：PiAgent 一个工具，action 区分操作；后台运行由 pi-bridge 自己持有，
 // mod 只读它的全局事件日志（~/.pi-bridge/events.ndjson），所以模块重载不会杀掉任何运行。
-const CLI = '/Users/tttinkl/code/agent-bridge/plugins/pi-bridge/src/cli.ts'
 const POLL_MS = 2000
 const RECONCILE_EVERY = 15
 const NOTE_MAX = 500
@@ -81,8 +80,22 @@ const PI_TOOL = {
   },
 }
 
+// pi-bridge 与本 mod 同属 pi-bridge marketplace：从源码目录加载时两者是兄弟目录，
+// 安装后在缓存里是 <marketplace>/<plugin>/<版本>/，两个插件出自同一提交，版本目录同名
+let cliPath: string | undefined
+async function cliOf($: any): Promise<string> {
+  if (cliPath) return cliPath
+  const root: string = $.plugin.root
+  const version = root.split('/').at(-1)
+  const candidates = [`${root}/../pi-bridge/src/cli.ts`, `${root}/../../pi-bridge/${version}/src/cli.ts`]
+  for (const path of candidates) {
+    if (await $.fs.exists(path).catch(() => false)) return (cliPath = path)
+  }
+  return candidates[0]!
+}
+
 async function cli($: any, args: string[], stdin?: string): Promise<{ code: number; out: Json | string }> {
-  const r = await $.process.run(['node', CLI, ...args], { stdin, timeoutMs: 90_000 })
+  const r = await $.process.run(['node', await cliOf($), ...args], { stdin, timeoutMs: 90_000 })
   const text = String(r.stdout ?? '').trim()
   try {
     return { code: r.exitCode, out: JSON.parse(text.split('\n').at(-1) ?? '') }

@@ -13,7 +13,7 @@ export interface RunOptions {
 /** 代理的 keep-alive 连接会让 pi 在 agent_settled 之后仍不退出 */
 const SETTLE_GRACE_MS = 2000;
 
-/** pi-code 按子代理处理：跳过 SessionStart/UserPromptSubmit/Stop 等会话级 hook（openviking 召回与记忆写入），保留工具级 hook */
+/** pi-code 按子代理处理：跳过 SessionStart/UserPromptSubmit/Stop 等会话级 hook（记忆召回与写入），保留工具级 hook */
 export const PI_ENV = { ...process.env, PI_CODE_SUBAGENT: "1" };
 
 export type Role = "advisor" | "executor";

@@ -1,13 +1,21 @@
 {
-  "name": "agent-bridge",
+  "name": "pi-bridge",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
+  "license": "MIT",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --test \"test/**/*.test.ts\""
+    "test": "node --test \"test/**/*.test.ts\"",
+    "test:agent": "claude plugin test plugins/pi-agent",
+    "validate": "claude plugin validate . && claude plugin validate plugins/pi-bridge && claude plugin validate plugins/pi-agent"
   },
   "devDependencies": {
     "@types/node": "^24.19.0",
     "typescript": "^7.0.2"
-  }
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "packageManager": "pnpm@11.24.0"
 }

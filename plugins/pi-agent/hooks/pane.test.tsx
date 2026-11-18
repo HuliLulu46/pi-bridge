@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 const PANE = {
-  plugin: 'pi',
+  plugin: 'pi-agent',
   component: 'Pane',
   requestId: 'pi',
   props: { title: 'PiAgent', isFocused: true, bodyColumns: 80, placement: 'inline', scroll: { offset: 0, bodyRows: 30 }, view: {} },
@@ -46,7 +46,7 @@ test('running tab draws list and detail', async ($, on) => {
 
 test('ToolUse：matcher 按 props.tool 只命中 PiAgent 的调用行', async ($) => {
   const row = (tool: string, input: unknown) => ({
-    plugin: 'pi',
+    plugin: 'pi-agent',
     surface: 'terminal',
     component: 'ToolUse',
     requestId: `t-${tool}`,

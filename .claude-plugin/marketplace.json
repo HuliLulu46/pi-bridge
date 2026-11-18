@@ -1,14 +1,17 @@
 {
-  "name": "agent-bridge",
-  "description": "Claude Code 与其他 coding agent 之间的桥接插件",
-  "owner": {
-    "name": "HuliLulu46"
-  },
+  "name": "pi-bridge",
+  "description": "在 Claude Code 里使用 pi coding agent：命令行桥接与 PiAgent 界面",
+  "owner": { "name": "HuliLulu46" },
   "plugins": [
     {
       "name": "pi-bridge",
       "source": "./plugins/pi-bridge",
-      "description": "让 Claude Code 调用 pi coding agent：advisor 只读评审与讨论，executor 在常驻进程中改代码"
+      "description": "pi-bridge 命令行与 skill：advisor 只读评审与讨论，executor 在常驻进程中改代码"
+    },
+    {
+      "name": "pi-agent",
+      "source": "./plugins/pi-agent",
+      "description": "PiAgent 工具与界面：后台派发 pi 任务、原生对话框回答提问、输入框上方显示运行中的任务（需要 pi-bridge）"
     }
   ]
 }
