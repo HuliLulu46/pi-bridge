@@ -63,6 +63,7 @@ for (const role of ["advisor", "executor"]) {
       assert.equal(snapshot.length, 3);
       assert.equal(piCalls().length, 1);
       assert.ok(!piCalls()[0]!.argv.includes("--model"));
+      assert.equal(existsSync(historyFile), false);
       const recordPath = join(home, "sessions", "fresh.json");
       assert.equal(JSON.parse(readFileSync(recordPath, "utf8")).owner, "owner-a");
       const file = findPiSession(dir, "fresh")!;
@@ -96,6 +97,7 @@ test("advisor --detach 转发 history-file 并在后台启动前导入", async (
     await sleep(50);
   }
   assert.equal(entries(readFileSync(join(home, "calls.jsonl.history.jsonl"), "utf8"))[0].id, "detached");
+  assert.equal(existsSync(historyFile), false);
 });
 
 test("已有记录（包括无主、同 owner、其他 owner 和已有副本）拒绝导入且不改记录", () => {
@@ -117,6 +119,7 @@ test("已有记录（包括无主、同 owner、其他 owner 和已有副本）�
   writeFileSync(join(home, "sessions", "taken.ownera.json"), JSON.stringify({ name: "taken.ownera", cwd: work, createdAt: now, updatedAt: now, owner: "owner-a", forkOf: "taken" }));
   assert.equal(run(["send", "taken", "--owner", "owner-a", "--history-file", historyFile, "--detach", "hi"]).code, 1);
   assert.equal(piCalls().length, 0);
+  assert.equal(existsSync(historyFile), true);
 });
 
 test("仅有 pi 会话文件也拒绝导入，不覆盖、不建立 bridge 记录", () => {
@@ -176,10 +179,13 @@ test("worktree 历史使用最终运行目录，失败时回滚本次 worktree",
   } finally {
     run(["rm", "branched"]);
   }
+  assert.equal(existsSync(historyFile), false);
+  writeFileSync(historyFile, JSON.stringify({ messages }));
   writeFileSync(join(dir, "existing.jsonl"), historyToPiSession(messages, "blocked", work));
   const blocked = run(["send", "blocked", "--worktree", "--history-file", historyFile, "--json", "hello"]);
   assert.equal(blocked.code, 1);
   assert.match(JSON.parse(blocked.stdout).error, /fork 只能用于新的会话名/);
   assert.equal(existsSync(join(work, ".pi-bridge", "worktrees", "blocked")), false);
   assert.equal(existsSync(join(home, "sessions", "blocked.json")), false);
+  assert.equal(existsSync(historyFile), true);
 });

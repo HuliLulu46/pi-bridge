@@ -149,6 +149,7 @@ function ensureRecord(
     if (imported) rmSync(imported, { force: true });
     throw created ? rollbackError(err, created.rollback()) : err;
   }
+  if (historyFile !== undefined) rmSync(historyFile, { force: true });
   return { record, isNew: true };
 }
 
