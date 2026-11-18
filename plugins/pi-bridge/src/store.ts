@@ -13,7 +13,7 @@ export interface WorktreeInfo {
 
 export interface SessionRecord {
   name: string;
-  /** 只出现在旧记录中；新记录以会话名作为 pi 的 session-id */
+  /** pi 的 session-id，新记录为 `<name>-<随机后缀>`；没有 id 的旧记录以会话名作为 session-id */
   id?: string;
   cwd: string;
   createdAt: string;

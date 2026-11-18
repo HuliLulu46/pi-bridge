@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { beforeEach, test } from "node:test";
 import { findPiSession, historyToPiSession } from "../plugins/pi-bridge/src/fork.ts";
-import { initRepo, piCalls, run, setEnv, setup } from "./helpers.ts";
+import { initRepo, piCalls, recordId, run, setEnv, setup } from "./helpers.ts";
 
 let home: string;
 let work: string;
@@ -56,7 +56,9 @@ for (const role of ["advisor", "executor"]) {
       assert.equal(result.code, 0, result.stderr);
       assert.match(result.stdout, /echo:暗号是什么？/);
       const snapshot = entries(readFileSync(join(home, "calls.jsonl.history.jsonl"), "utf8"));
-      assert.equal(snapshot[0].id, "fresh");
+      const id = recordId("fresh");
+      assert.match(id, /^fresh-[a-z0-9]{6}$/);
+      assert.equal(snapshot[0].id, id);
       assert.equal(snapshot[0].cwd, work);
       assert.equal(snapshot[1].message.content, messages[0].text);
       assert.equal(snapshot[2].message.content[0].text, messages[1].text);
@@ -66,7 +68,7 @@ for (const role of ["advisor", "executor"]) {
       assert.equal(existsSync(historyFile), false);
       const recordPath = join(home, "sessions", "fresh.json");
       assert.equal(JSON.parse(readFileSync(recordPath, "utf8")).owner, "owner-a");
-      const file = findPiSession(dir, "fresh")!;
+      const file = findPiSession(dir, id)!;
       const before = readFileSync(file, "utf8");
       const repeated = run(["send", "fresh", "--role", role, "--history-file", historyFile, "--json", "again"]);
       assert.equal(repeated.code, 1);
@@ -96,7 +98,7 @@ test("advisor --detach 转发 history-file 并在后台启动前导入", async (
     assert.ok(Date.now() < deadline, "等待 detach 超时");
     await sleep(50);
   }
-  assert.equal(entries(readFileSync(join(home, "calls.jsonl.history.jsonl"), "utf8"))[0].id, "detached");
+  assert.equal(entries(readFileSync(join(home, "calls.jsonl.history.jsonl"), "utf8"))[0].id, recordId("detached"));
   assert.equal(existsSync(historyFile), false);
 });
 
@@ -122,21 +124,17 @@ test("已有记录（包括无主、同 owner、其他 owner 和已有副本）�
   assert.equal(existsSync(historyFile), true);
 });
 
-test("仅有 pi 会话文件也拒绝导入，不覆盖、不建立 bridge 记录", () => {
+test("rm 后残留的同名 pi 会话文件不挡导入：新会话用新 id，旧文件不动", () => {
   mkdirSync(dir, { recursive: true });
-  // 文件名故意不含会话 id，必须按会话头查找。
   const old = join(dir, "unrelated-name.jsonl");
   const original = historyToPiSession(messages, "orphan", work);
   writeFileSync(old, original);
-  for (const role of ["advisor", "executor"]) {
-    const result = run(["send", "orphan", "--role", role, "--history-file", historyFile, "--json", "hello"]);
-    assert.equal(result.code, 1);
-    assert.match(JSON.parse(result.stdout).error, /fork 只能用于新的会话名/);
-    assert.equal(readFileSync(old, "utf8"), original);
-    assert.deepEqual(readdirSync(dir), ["unrelated-name.jsonl"]);
-    assert.equal(existsSync(join(home, "sessions", "orphan.json")), false);
-  }
-  assert.equal(piCalls().length, 0);
+  const result = run(["send", "orphan", "--history-file", historyFile, "--json", "hello"]);
+  assert.equal(result.code, 0, result.stdout);
+  const id = recordId("orphan");
+  assert.notEqual(id, "orphan");
+  assert.equal(readFileSync(old, "utf8"), original);
+  assert.ok(findPiSession(dir, id));
 });
 
 test("history-file 校验绝对路径、文件读取、JSON、非空数组和 role/text，错误兼容 JSON 与 detach", () => {
@@ -181,10 +179,13 @@ test("worktree 历史使用最终运行目录，失败时回滚本次 worktree",
   }
   assert.equal(existsSync(historyFile), false);
   writeFileSync(historyFile, JSON.stringify({ messages }));
-  writeFileSync(join(dir, "existing.jsonl"), historyToPiSession(messages, "blocked", work));
+  // 会话目录指向一个普通文件：导入写不进去，必须回滚刚建的 worktree
+  const notDir = join(home, "not-a-dir");
+  writeFileSync(notDir, "");
+  setEnv({ PI_CODING_AGENT_SESSION_DIR: notDir, FAKE_PI_EXPECT_HISTORY: "1" });
   const blocked = run(["send", "blocked", "--worktree", "--history-file", historyFile, "--json", "hello"]);
   assert.equal(blocked.code, 1);
-  assert.match(JSON.parse(blocked.stdout).error, /fork 只能用于新的会话名/);
+  assert.equal(JSON.parse(blocked.stdout).status, "error");
   assert.equal(existsSync(join(work, ".pi-bridge", "worktrees", "blocked")), false);
   assert.equal(existsSync(join(home, "sessions", "blocked.json")), false);
   assert.equal(existsSync(historyFile), true);

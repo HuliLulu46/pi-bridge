@@ -10,7 +10,7 @@ import { ADVISOR_ARGS, modelArgs, runPi, type Role } from "./pi.ts";
 import { subagentPrompt } from "./prompts.ts";
 import { preview, toolNotice } from "./events.ts";
 import { createWorktree, projectIdentity, removeWorktree, rollbackError, type RepoIdentity, type ReviewScope } from "./git.ts";
-import { forkPiSession, importPiHistory, readHistoryFile } from "./fork.ts";
+import { findPiSession, forkPiSession, importPiHistory, newSessionId, piSessionDir, readHistoryFile } from "./fork.ts";
 import { prepareReview } from "./review.ts";
 import {
   appendEvent,
@@ -140,9 +140,10 @@ function ensureRecord(
   const now = new Date().toISOString();
   const base = { name, createdAt: now, updatedAt: now, ...(owner !== undefined ? { owner } : {}) };
   const created = worktree ? createWorktree(cwd, name) : undefined;
-  const record = created ? { ...base, cwd: created.path, worktree: created.info } : { ...base, cwd };
+  let record: SessionRecord = created ? { ...base, cwd: created.path, worktree: created.info } : { ...base, cwd };
   let imported: string | undefined;
   try {
+    record = { ...record, id: newSessionId(name, record.cwd) };
     if (history) imported = importPiHistory(history, sessionIdOf(record), record.cwd);
     writeRecord(record);
   } catch (err) {
@@ -229,9 +230,15 @@ function resolveOwned(name: string, owner: string | undefined, op: OwnerOp): str
   const fork = `${name}.${ownerTag(owner)}`;
   assertName(fork);
   if (readRecord(fork)) throw new Error(`副本名 ${fork} 已被别的会话占用；请换一个新会话名`);
-  forkPiSession(sessionIdOf(record), fork, record.cwd);
+  const id = newSessionId(fork, record.cwd);
+  const file = forkPiSession(sessionIdOf(record), id, record.cwd);
   const now = new Date().toISOString();
-  writeRecord({ name: fork, cwd: record.cwd, createdAt: now, updatedAt: now, owner, forkOf: name });
+  try {
+    writeRecord({ name: fork, id, cwd: record.cwd, createdAt: now, updatedAt: now, owner, forkOf: name });
+  } catch (err) {
+    rmSync(file, { force: true });
+    throw err;
+  }
   return fork;
 }
 
@@ -880,15 +887,13 @@ async function rm(argv: string[]): Promise<number> {
   try {
     const record = readRecord(name);
     if (!record) throw new Error(`会话不存在：${name}`);
+    // 先找会话文件再删 worktree：pi 按真实 cwd 定位会话目录，目录删掉后就算不出来了
+    const file = findPiSession(piSessionDir(record.cwd), sessionIdOf(record));
     if (record.worktree) removeWorktree(record.worktree, record.cwd, values.force ?? false);
     removeRecord(name);
+    const historyNote = file ? `；pi 会话文件仍保留，pi --session ${shellQuote(file)} 可打开旧历史` : "";
     const worktreeNote = record.worktree ? `；worktree 已删除，分支 ${record.worktree.branch} 保留` : "";
-    // 旧格式记录的 UUID 只存在于这份记录里，删除后同名 send 会以会话名新建会话
-    const resumeNote = record.id
-      ? `；这是旧格式会话，同名再 send 会新建会话，旧历史在 ${record.cwd} 执行 pi --session-id ${record.id} 打开`
-      : "，同名再 send 会续接";
-    const historyNote = `pi 会话文件（${sessionIdOf(record)}）仍保留`;
-    print(`已删除会话 ${name}，${historyNote}${resumeNote}${worktreeNote}`);
+    print(`已删除会话 ${name}，同名再 send 会新建 pi 会话${historyNote}${worktreeNote}`);
     return 0;
   } finally {
     release();
@@ -954,6 +959,10 @@ async function review(argv: string[]): Promise<number> {
   } finally {
     prepared.cleanup();
   }
+}
+
+function shellQuote(text: string): string {
+  return `'${text.replaceAll("'", `'\\''`)}'`;
 }
 
 /** 如 review-20261001T013000-4242：进程号避免同一秒内的两次评审撞名 */

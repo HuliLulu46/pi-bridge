@@ -62,6 +62,8 @@ export function env(): NodeJS.ProcessEnv {
     PI_BRIDGE_HOME: home,
     PI_BRIDGE_WATCH_WAIT_MS: "3000",
     FAKE_PI_CALLS: join(home, "calls.jsonl"),
+    // pi 的数据目录放进隔离 home：bridge 会按它查找 pi 会话文件，不碰本机的 ~/.pi
+    PI_CODING_AGENT_DIR: join(home, "pi-agent"),
     ...extraEnv,
   };
 }
@@ -87,6 +89,11 @@ export function piCalls(): Array<{ argv: string[]; cwd: string; subagent?: strin
     .trim()
     .split("\n")
     .map((line) => JSON.parse(line));
+}
+
+/** 会话记录里的 pi session-id */
+export function recordId(name: string): string {
+  return JSON.parse(readFileSync(join(home, "sessions", `${name}.json`), "utf8")).id;
 }
 
 export function sessionIdOf(argv: string[]): string | undefined {

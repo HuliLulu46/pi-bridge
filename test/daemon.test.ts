@@ -46,7 +46,7 @@ test("executor send 自动启动常驻进程，pi 以 rpc 模式运行并带系�
   assert.equal(calls.length, 1);
   const argv = calls[0]!.argv;
   assert.ok(argv.includes("rpc"));
-  assert.equal(argv[argv.indexOf("--session-id") + 1], "s1");
+  assert.match(argv[argv.indexOf("--session-id") + 1]!, /^s1-[a-z0-9]{6}$/);
   assert.ok(argv.includes("--append-system-prompt"));
   assert.ok(argv.includes("--name"));
   assert.ok(!argv.includes("--no-extensions"));

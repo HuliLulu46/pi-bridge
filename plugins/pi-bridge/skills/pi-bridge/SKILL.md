@@ -25,7 +25,7 @@ description: 通过 pi-bridge 命令把任务交给 pi coding agent：以只读�
 | `pi-bridge review [--staged \| --base <分支>] [--cwd <目录>] [--focus <关注点>] [--model <模型>] [--thinking <等级>]` | 以只读方式评审当前改动，见“让 pi 评审” |
 | `pi-bridge watch <会话名>` | 跟随该会话正在进行的运行 |
 | `pi-bridge list [--all \| --here] [--active]` | 列出会话：名字、状态（idle / running / daemon）、更新时间、目录、session-id；worktree 会话另附 `分支@base`。默认只列当前项目（git 主仓库根；worktree 会话与主仓库算同一项目），`--all` 列全部项目，`--active` 只列 running/daemon |
-| `pi-bridge rm <会话名> [--force]` | 删除会话记录与 worktree（分支保留）；有常驻进程时先停止它，正在执行的任务随之中止；pi 的会话文件保留 |
+| `pi-bridge rm <会话名> [--force]` | 删除会话记录与 worktree（分支保留）；有常驻进程时先停止它，正在执行的任务随之中止；pi 的会话文件保留，同名再 `send` 新建 pi 会话 |
 | `pi-bridge steer <会话名> <消息\|->` | executor 任务中途插话：当前这轮工具执行完后送达，pi 据此调整 |
 | `pi-bridge answer <会话名> <提问 id> <回答\|->` / `--cancel` | 回答 pi 的提问，然后继续等待 |
 | `pi-bridge abort <会话名>` | 中止 executor 当前任务，会话保留 |
@@ -93,13 +93,13 @@ watch 输出的行格式：`[start]` 本次消息摘要、`[tool]` 工具调用�
 - 同一件事的多轮对话复用同一个会话名，pi 记得之前的内容，后续消息不必重复背景。不同任务用不同会话名。
 - 会话名只能包含字母、数字和 `. _ -`，首尾必须是字母或数字。
 - 工作目录在首次 `send` 时绑定（默认为当前目录），之后在哪里调用都在该目录运行；传入不同的 `--cwd` 会报错。要换目录就换一个会话名。
-- `send <新会话名> --history-file <绝对路径> <消息|->`：首次运行前导入对话历史，文件为 UTF-8 JSON `{"messages":[{"role":"user","text":"之前的问题"},{"role":"assistant","text":"之前的回答"}]}`。`messages` 必须非空，每条 `role` 只能为 `user` 或 `assistant`，`text` 为字符串；调用方保证第一条为 user、连续同角色消息已合并。本次消息仍由位置参数或 stdin 提供。导入成功后删除该文件，导入失败时保留。支持 advisor、executor、`--detach`、`--worktree`；不指定 `--model` 时使用默认模型。已有 bridge 记录、残留 pi 会话文件、属于其他 owner 的同名会话均报错“fork 只能用于新的会话名”，不会自动分副本或重复导入；`rm` 后仍有 pi 历史的名字也不能用于导入。
+- `send <新会话名> --history-file <绝对路径> <消息|->`：首次运行前导入对话历史，文件为 UTF-8 JSON `{"messages":[{"role":"user","text":"之前的问题"},{"role":"assistant","text":"之前的回答"}]}`。`messages` 必须非空，每条 `role` 只能为 `user` 或 `assistant`，`text` 为字符串；调用方保证第一条为 user、连续同角色消息已合并。本次消息仍由位置参数或 stdin 提供。导入成功后删除该文件，导入失败时保留。支持 advisor、executor、`--detach`、`--worktree`；不指定 `--model` 时使用默认模型。已有 bridge 记录、属于其他 owner 的同名会话均报错“fork 只能用于新的会话名”，不会自动分副本或重复导入。
 - 角色每次 `send` 单独指定，不写就是 advisor：
   - executor 会话的后续消息同样要写 `--role executor`。漏写时，常驻进程还在则报错，补上即可；常驻进程已空闲退出则本轮以只读方式运行，pi 会说明无法修改。
   - 从 executor 切到 advisor 前先 `stop`。
 - 同一会话同一时间只能运行一个任务：advisor 运行中再 `send` 会因会话锁报错；executor 运行中再 `send` 会报错并提示改用 `steer`。需要并行时用不同会话名。
 - `--model` 一经指定就记入会话，之后不写时沿用；指定的模型不可用时该会话的每一轮都会失败，要显式换一个模型。executor 的 `--model` 与 `--thinking` 只在启动常驻进程的那次生效。
-- `rm` 后 pi 的会话文件仍保留，用同一个名字再 `send` 会续接旧历史；要全新会话就换一个名字。旧格式会话（`list` 中 session-id 是 UUID）例外：`rm` 后同名 `send` 会新建会话，`rm` 的输出会给出在终端打开旧历史的命令。评审会话不再追问时用 `rm` 删除。
+- 会话名只在会话存在期间对应同一个 pi 会话：新会话的 pi session-id 是 `<会话名>-<随机后缀>`（旧会话可能是会话名本身或 UUID）。`rm` 后同名 `send` 新建 pi 会话，不会接上旧历史；pi 会话文件仍保留，`rm` 的输出给出 `pi --session <文件路径>`，可在终端打开。评审会话不再追问时用 `rm` 删除。
 - 用户想在终端里查看会话时：先用 `list` 确认该会话没有常驻进程和运行中的任务，再在会话目录执行 `pi --session-id <list 显示的 session-id>`。
 
 ## 工作目录：同一目录还是 worktree

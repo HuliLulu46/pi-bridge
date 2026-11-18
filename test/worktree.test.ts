@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
-import { gitIn, initRepo, piCalls, run, setup } from "./helpers.ts";
+import { gitIn, initRepo, piCalls, recordId, run, setup } from "./helpers.ts";
 
 let home: string;
 let work: string;
@@ -192,6 +192,23 @@ test("rm：有未提交改动时拒绝，--force 删除 worktree 且保留分支
   assert.match(forced.stdout, /分支 pi\/w1 保留/);
   assert.ok(!existsSync(worktreeOf("w1")));
   assert.equal(gitIn(work, "branch", "--list", "pi/w1").trim(), "pi/w1");
+});
+
+test("rm：worktree 会话给出 pi 会话文件的绝对路径（worktree 删除后无法回到原 cwd 用 --session-id）", () => {
+  run(["send", "w1", "--worktree", "hello"]);
+  const id = recordId("w1");
+  const dir = join(home, "pi-agent", "sessions", `--${worktreeOf("w1").replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`);
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, `2026-11-18T00-00-00-000Z_${id}.jsonl`);
+  writeFileSync(file, `${JSON.stringify({ type: "session", version: 3, id, timestamp: "2026-11-18T00:00:00.000Z", cwd: worktreeOf("w1") })}\n`);
+
+  const removed = run(["rm", "w1"]);
+  assert.equal(removed.code, 0, removed.stderr);
+  assert.equal(
+    removed.stdout,
+    `已删除会话 w1，同名再 send 会新建 pi 会话；pi 会话文件仍保留，pi --session '${file}' 可打开旧历史；worktree 已删除，分支 pi/w1 保留\n`,
+  );
+  assert.equal(existsSync(worktreeOf("w1")), false);
 });
 
 test("rm：worktree 当前提交不在任何分支上时，即使 --force 也拒绝删除", () => {

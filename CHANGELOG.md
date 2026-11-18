@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.2
+
+- New sessions and owner forks get their own pi session-id, `<name>-<6 random chars>`, so reusing a name after `pi-bridge rm` starts a fresh pi session instead of resuming the old history. Existing sessions keep their id.
+- `rm` prints `pi --session <file>` to reopen the old history, which also works for worktree sessions whose directory is gone.
+- A leftover pi session file with the bare session name no longer blocks `--history-file` imports.
+
 ## Unreleased
 
 - The `/pi` pane detail page now shows an activity feed: a timeline of what pi is doing (tool calls with their arguments, tool errors, retries, steers, questions). For a running task the last entry is marked as the current action with how long ago it started; a finished task shows its feed above the reply.

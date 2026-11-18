@@ -3,7 +3,7 @@ import { mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { test } from "node:test";
-import { initRepo, piCalls, run, sessionIdOf, setEnv, setup } from "./helpers.ts";
+import { initRepo, piCalls, recordId, run, sessionIdOf, setEnv, setup } from "./helpers.ts";
 
 // 主会话归属：同名会话属于别的主会话时，后来者分出副本续接，不共用、不叠加
 const A = "aaaaaa11-0000-0000-0000-000000000000";
@@ -46,15 +46,17 @@ async function waitIdle(name: string): Promise<void> {
 test("别的主会话 send 同名会话：分出副本、复制上下文，之后同名都进副本；原主会话照常续接", () => {
   start();
   assert.equal(run(["send", "s1", "--owner", A, "hello"]).code, 0);
-  const source = seed("s1");
+  const source = seed(recordId("s1"));
 
   const out = json(run(["send", "s1", "--owner", B, "--json", "hi"]).stdout);
   assert.equal(out.status, "done");
   assert.equal(out.session, "s1.bbbbbb");
-  assert.equal(sessionIdOf(piCalls().at(-1)!.argv), "s1.bbbbbb");
-  const forkFile = readdirSync(piDir()).find((f) => f.endsWith("_s1.bbbbbb.jsonl"))!;
+  const forkId = recordId("s1.bbbbbb");
+  assert.match(forkId, /^s1\.bbbbbb-[a-z0-9]{6}$/);
+  assert.equal(sessionIdOf(piCalls().at(-1)!.argv), forkId);
+  const forkFile = readdirSync(piDir()).find((f) => f.endsWith(`_${forkId}.jsonl`))!;
   const lines = readFileSync(join(piDir(), forkFile), "utf8").trim().split("\n").map((l) => JSON.parse(l));
-  assert.equal(lines[0].id, "s1.bbbbbb");
+  assert.equal(lines[0].id, forkId);
   assert.equal(lines[0].parentSession, source);
   assert.equal(lines[1].message.content, "A 的上下文");
 
@@ -71,6 +73,22 @@ test("别的主会话 send 同名会话：分出副本、复制上下文，之�
   assert.equal(rows.find((r: any) => r.name === "s1").owner, A);
 });
 
+test("副本 rm 后再派：从源会话重新分出新 id 的副本，不接回旧副本的历史", () => {
+  start();
+  run(["send", "s1", "--owner", A, "hello"]);
+  const source = seed(recordId("s1"));
+  assert.equal(json(run(["send", "s1", "--owner", B, "--json", "hi"]).stdout).session, "s1.bbbbbb");
+  const first = recordId("s1.bbbbbb");
+  assert.equal(run(["rm", "s1.bbbbbb"]).code, 0);
+
+  assert.equal(json(run(["send", "s1", "--owner", B, "--json", "again"]).stdout).session, "s1.bbbbbb");
+  const second = recordId("s1.bbbbbb");
+  assert.notEqual(second, first);
+  assert.equal(sessionIdOf(piCalls().at(-1)!.argv), second);
+  const file = readdirSync(piDir()).find((f) => f.endsWith(`_${second}.jsonl`))!;
+  assert.equal(JSON.parse(readFileSync(join(piDir(), file), "utf8").split("\n")[0]!).parentSession, source);
+});
+
 test("无主的会话：第一个带 --owner 的主会话认领，不分副本；不带 --owner 的调用照旧", () => {
   start();
   run(["send", "s1", "hello"]);
@@ -83,7 +101,7 @@ test("无主的会话：第一个带 --owner 的主会话认领，不分副本�
 test("别的主会话的会话正在运行：拒绝；结束后再派就分副本", async () => {
   start();
   run(["send", "s1", "--owner", A, "hello"]);
-  seed("s1");
+  seed(recordId("s1"));
   assert.equal(run(["send", "s1", "--owner", A, "--detach", "slow"]).code, 0);
   const busy = run(["send", "s1", "--owner", B, "--json", "hi"]);
   assert.equal(busy.code, 1);
@@ -126,7 +144,7 @@ test("cwd 经过符号链接：按真实路径找 pi 会话目录（pi 也是这
   const link = join(home, "link-to-work");
   symlinkSync(work, link);
   assert.equal(run(["send", "s1", "--owner", A, "--cwd", link, "hello"]).code, 0);
-  seed("s1");
+  seed(recordId("s1"));
   const out = json(run(["send", "s1", "--owner", B, "--json", "hi"]).stdout);
   assert.equal(out.status, "done", JSON.stringify(out));
   assert.equal(out.session, "s1.bbbbbb");

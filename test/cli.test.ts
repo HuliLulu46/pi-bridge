@@ -3,7 +3,7 @@ import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { beforeEach, test } from "node:test";
-import { piCalls, run, runAsync, sessionIdOf, setup } from "./helpers.ts";
+import { piCalls, recordId, run, runAsync, sessionIdOf, setEnv, setup } from "./helpers.ts";
 
 let home: string;
 let work: string;
@@ -12,7 +12,7 @@ beforeEach(() => {
   ({ home, work } = setup());
 });
 
-test("首次 send 创建会话，之后在任意目录 send 都以会话名作为 session-id 并复用 cwd", () => {
+test("首次 send 创建会话并生成 <会话名>-<随机后缀> 的 session-id，之后在任意目录 send 都复用它和 cwd", () => {
   const first = run(["send", "s1", "hello"]);
   assert.equal(first.code, 0, first.stderr);
   assert.equal(first.stdout, "echo:hello\n");
@@ -21,8 +21,10 @@ test("首次 send 创建会话，之后在任意目录 send 都以会话名作�
   assert.equal(second.code, 0, second.stderr);
 
   const [a, b] = piCalls();
-  assert.equal(sessionIdOf(a!.argv), "s1");
-  assert.equal(sessionIdOf(b!.argv), "s1");
+  const id = recordId("s1");
+  assert.match(id, /^s1-[a-z0-9]{6}$/);
+  assert.equal(sessionIdOf(a!.argv), id);
+  assert.equal(sessionIdOf(b!.argv), id);
   assert.equal(a!.cwd, work);
   assert.equal(b!.cwd, work);
   assert.ok(a!.argv.includes("--name"));
@@ -180,19 +182,35 @@ test("watch 可以先于首次 send 启动；等待期满仍没有会话时报�
   assert.match(missing.stderr, /会话不存在：nosuch/);
 });
 
-test("list 列出会话，rm 后同名 send 续接同一 session-id", () => {
+test("list 列出会话；rm 后同名 send 新建 pi 会话，不接旧历史", () => {
   run(["send", "s1", "hello"]);
-  assert.match(run(["list"]).stdout, /^s1\tidle\t.*\ts1$/m);
+  const old = recordId("s1");
+  assert.match(run(["list"]).stdout, new RegExp(`^s1\\tidle\\t.*\\t${old}$`, "m"));
 
   const removed = run(["rm", "s1"]);
   assert.equal(removed.code, 0);
-  assert.match(removed.stdout, /同名再 send 会续接/);
+  assert.equal(removed.stdout, "已删除会话 s1，同名再 send 会新建 pi 会话\n");
   assert.equal(run(["list"]).stdout, "（没有会话）\n");
 
   run(["send", "s1", "hello"]);
   const [a, b] = piCalls();
-  assert.equal(sessionIdOf(a!.argv), "s1");
-  assert.equal(sessionIdOf(b!.argv), "s1");
+  assert.equal(sessionIdOf(a!.argv), old);
+  assert.notEqual(sessionIdOf(b!.argv), old);
+  assert.match(sessionIdOf(b!.argv)!, /^s1-[a-z0-9]{6}$/);
+});
+
+test("rm 时 pi 会话文件还在：给出 pi --session <路径> 打开旧历史", () => {
+  const dir = join(home, "pi sessions");
+  setEnv({ PI_CODING_AGENT_SESSION_DIR: dir });
+  run(["send", "s1", "hello"]);
+  const id = recordId("s1");
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, `2026-11-18T00-00-00-000Z_${id}.jsonl`);
+  writeFileSync(file, `${JSON.stringify({ type: "session", version: 3, id, timestamp: "2026-11-18T00:00:00.000Z", cwd: work })}\n`);
+
+  const removed = run(["rm", "s1"]);
+  assert.equal(removed.code, 0);
+  assert.equal(removed.stdout, `已删除会话 s1，同名再 send 会新建 pi 会话；pi 会话文件仍保留，pi --session '${file}' 可打开旧历史\n`);
 });
 
 test("含 id 字段的旧记录以该 id 作为 session-id", () => {
@@ -211,7 +229,7 @@ test("含 id 字段的旧记录以该 id 作为 session-id", () => {
 
   const removed = run(["rm", "old"]);
   assert.equal(removed.code, 0);
-  assert.ok(removed.stdout.includes(`这是旧格式会话，同名再 send 会新建会话，旧历史在 ${work} 执行 pi --session-id ${id} 打开`));
+  assert.equal(removed.stdout, "已删除会话 old，同名再 send 会新建 pi 会话\n");
 });
 
 test("list 默认按当前项目过滤，--all 看全部，--here 等同默认", () => {

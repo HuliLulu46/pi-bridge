@@ -1,6 +1,6 @@
 {
   "name": "pi-bridge",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "让 Claude Code 调用 pi coding agent：按会话名续接 pi 会话，advisor 只读评审与讨论，executor 在常驻进程中改代码并支持 pi 中途提问、插话与中止",
   "author": { "name": "HuliLulu46" },
   "license": "MIT",

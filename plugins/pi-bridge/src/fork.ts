@@ -162,14 +162,24 @@ export function findPiSession(dir: string, id: string): string | undefined {
   return undefined;
 }
 
+const ID_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789";
+
 /**
- * 把 sourceId 的 pi 会话复制成 newId；newId 已存在（上次分出后没来得及写记录）就直接用它。
- * 先写临时文件再改名：pi 只认 .jsonl，读不到写了一半的副本
+ * 新会话（含副本）的 pi session-id：会话名加 6 位随机后缀，并避开 cwd 下已有的 pi 会话。
+ * 会话名删除后再用，得到的是全新的 pi 会话，不会接上同名的旧历史
  */
+export function newSessionId(name: string, cwd: string): string {
+  const dir = piSessionDir(cwd);
+  for (;;) {
+    const suffix = Array.from(randomBytes(6), (byte) => ID_CHARS[byte % ID_CHARS.length]).join("");
+    const id = `${name}-${suffix}`;
+    if (!findPiSession(dir, id)) return id;
+  }
+}
+
+/** 把 sourceId 的 pi 会话复制成 newId。先写临时文件再改名：pi 只认 .jsonl，读不到写了一半的副本 */
 export function forkPiSession(sourceId: string, newId: string, cwd: string): string {
   const dir = piSessionDir(cwd);
-  const existing = findPiSession(dir, newId);
-  if (existing) return existing;
   const source = findPiSession(dir, sourceId);
   if (!source) throw new Error(`找不到 pi 会话 ${sourceId} 的会话文件（${dir}），无法分出副本；请换一个新会话名`);
   const lines = readFileSync(source, "utf8").split("\n").filter((line) => line.trim() !== "");
