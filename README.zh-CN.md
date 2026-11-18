@@ -124,7 +124,7 @@ Claude Code 不会把 `←` `→` 交给 mod。输入框为空时，面板里按
 在 Claude Code 里执行：
 
 ```
-/plugin marketplace add HuliLulu46/pi-bridge
+/plugin marketplace add HuliLulu46/pi-bridge-for-claude
 /plugin install pi-bridge@pi-bridge
 /plugin install pi-agent@pi-bridge
 ```
@@ -132,7 +132,7 @@ Claude Code 不会把 `←` `→` 交给 mod。输入框为空时，面板里按
 或在终端里：
 
 ```bash
-claude plugin marketplace add HuliLulu46/pi-bridge
+claude plugin marketplace add HuliLulu46/pi-bridge-for-claude
 claude plugin install pi-bridge@pi-bridge
 claude plugin install pi-agent@pi-bridge   # 可选
 ```

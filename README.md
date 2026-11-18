@@ -122,7 +122,7 @@ Claude Code does not pass `←` and `→` to mods. With an empty prompt, `←` p
 In Claude Code:
 
 ```
-/plugin marketplace add HuliLulu46/pi-bridge
+/plugin marketplace add HuliLulu46/pi-bridge-for-claude
 /plugin install pi-bridge@pi-bridge
 /plugin install pi-agent@pi-bridge
 ```
@@ -130,7 +130,7 @@ In Claude Code:
 Or from a terminal:
 
 ```bash
-claude plugin marketplace add HuliLulu46/pi-bridge
+claude plugin marketplace add HuliLulu46/pi-bridge-for-claude
 claude plugin install pi-bridge@pi-bridge
 claude plugin install pi-agent@pi-bridge   # optional
 ```

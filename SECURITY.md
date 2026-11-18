@@ -14,4 +14,4 @@ pi-bridge stores session records, run records (including full replies), per-run 
 
 ## Reporting a vulnerability
 
-Please report privately through [GitHub security advisories](https://github.com/HuliLulu46/pi-bridge/security/advisories/new) rather than a public issue.
+Please report privately through [GitHub security advisories](https://github.com/HuliLulu46/pi-bridge-for-claude/security/advisories/new) rather than a public issue.
