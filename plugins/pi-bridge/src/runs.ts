@@ -54,7 +54,20 @@ export interface BridgeEvent {
   ask?: Ask;
 }
 
+/**
+ * 本次运行动作记录（runs/<runId>.activity.ndjson）的一行：全局事件的不截断版，
+ * 外加 tracker 给的 tool（带调用 id 和完整入参）、tool-end、note
+ */
+export interface ActivityEvent extends Omit<BridgeEvent, "type"> {
+  type: EventType | "tool-end" | "note";
+  /** tool / tool-end 的调用 id */
+  id?: string;
+  /** tool-end：工具出错或被拦截 */
+  error?: boolean;
+}
+
 const EVENT_TEXT_MAX = 300;
+const ACTIVITY_TEXT_MAX = 4000;
 /** 事件日志超过这个大小就轮转：旧的改名为 .1（只留一份），读者发现偏移超出文件大小会从头读新文件 */
 const EVENTS_MAX_BYTES = Number(process.env.PI_BRIDGE_EVENTS_MAX_BYTES ?? 4 * 1024 * 1024);
 /** 运行记录与后台输出保留的天数 */
@@ -103,8 +116,33 @@ export function writeRun(record: RunRecord): void {
   renameSync(tmp, path);
 }
 
-/** 一次 O_APPEND 写入一整行；行长受 EVENT_TEXT_MAX 限制，并发写入不会交错 */
+export function activityPath(runId: string): string {
+  return join(runsDir(), `${runId}.activity.ndjson`);
+}
+
+/**
+ * 每次运行只有一个写入者（它的常驻进程或前台进程），行长不受全局日志的 300 字限制，文本最长 ACTIVITY_TEXT_MAX；
+ * 随运行记录一起被 pruneRuns 清理。只给界面看：写不进去就算了，不能打断运行，也不能挡住全局日志
+ */
+export function appendActivity(event: Omit<ActivityEvent, "ts">): void {
+  const line: ActivityEvent = {
+    ts: new Date().toISOString(),
+    ...event,
+    ...(event.text !== undefined ? { text: event.text.slice(0, ACTIVITY_TEXT_MAX) } : {}),
+  };
+  try {
+    appendFileSync(activityPath(event.runId), `${JSON.stringify(line)}\n`);
+  } catch {
+    // 磁盘满、权限不对：界面退回全局日志里能看到的部分
+  }
+}
+
+/**
+ * 写全局日志，同时把文本更长的版本写进本次运行的动作记录（tool 除外：tracker 另写带调用 id 和入参的版本）。
+ * 全局日志一次 O_APPEND 写入一整行；行长受 EVENT_TEXT_MAX 限制，并发写入不会交错
+ */
 export function appendEvent(event: Omit<BridgeEvent, "ts">): void {
+  if (event.type !== "tool") appendActivity(event);
   const line: BridgeEvent = {
     ts: new Date().toISOString(),
     ...event,

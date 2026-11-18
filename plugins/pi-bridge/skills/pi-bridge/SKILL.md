@@ -37,6 +37,7 @@ description: 通过 pi-bridge 命令把任务交给 pi coding agent：以只读�
 - `send`、`answer`、`review` 加 `--detach`（隐含 `--json`）：立即返回 `{"session","runId","status"}`，任务在后台继续。运行记录写出之后才返回，所以随后的 `result` 一定查得到；会话被占用等失败直接报错，不会假装开始。
 - `pi-bridge result <runId>`：一次运行的完整记录（状态、完整回复、待回答的提问），在 `~/.pi-bridge/runs/<runId>.json`，保留 14 天（`PI_BRIDGE_RUN_KEEP_DAYS` 调整）。
 - 全局事件日志 `~/.pi-bridge/events.ndjson`：每行一个事件 `{ts, session, runId, type, text?, ask?}`，type 为 start / tool / tool-error / retry / steer / ask / answered / ask-timeout / confirm-denied / done / failed；不含回复正文，正文按 runId 取。超过 4 MB 轮转为 `.1`（`PI_BRIDGE_EVENTS_MAX_BYTES` 调整）：读者记字节偏移，偏移超出文件大小就从头读。`pi-bridge events [--since <偏移>] [--follow]` 读取它。
+- 每次运行的动作记录 `~/.pi-bridge/runs/<runId>.activity.ndjson`：这次运行的全局事件，外加 `tool`（带调用 id `id` 和入参 JSON）、`tool-end`（`id`，出错时 `error: true`）、`note`（pi 在工具调用之间写的话，不含最终回复）。每行 `text` 最长 4000 字（全局日志是 300 字），超长的入参 JSON 会被截断。随运行记录一起清理；写入失败时跳过，不影响运行和全局日志。
 - `list --json` 的每个会话带 `lastRun`（最近一次运行的 `runId`、`status`、`startedAt`、`endedAt`，失败时附截短的 `error`）：会话的 `status` 只说进程是否在跑，idle 不代表上次成功。
 - 运行记录里 `status` 为 running 但会话已不持锁（`list` 显示 idle）说明运行异常中断。
 - 主会话归属（`--owner <主会话 id>`，PiAgent mod 用；不带时行为不变）：会话记录里的 `owner` 是它所属的主会话，无主的会话被第一个带 `--owner` 派发的主会话认领。同名会话属于别的主会话时，`send` 自动分出本主会话的副本 `<会话名>.<id 前 6 位>`（复制当时的全部上下文，`forkOf` 记来源），之后同名都进副本，两边不再互相叠加；对方正在运行或会话带 worktree 时拒绝。`steer`、`answer`、`abort`、`stop` 只能作用于本主会话的会话或副本。`list --json` 带 `owner`、`forkOf`。

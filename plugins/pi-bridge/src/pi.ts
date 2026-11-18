@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { createLineSplitter, createRunTracker, parseEvent, type RunResult } from "./events.ts";
+import { createLineSplitter, createRunTracker, parseEvent, type Activity, type RunResult } from "./events.ts";
 
 export interface RunOptions {
   /** 缺省时以 --no-session 运行，不留下会话记录 */
@@ -8,6 +8,8 @@ export interface RunOptions {
   message: string;
   piArgs: string[];
   onProgress: (line: string) => void;
+  /** 必填：mod 有动作记录就只读它，漏写会让详情页丢掉工具行 */
+  onActivity: (activity: Activity) => void;
 }
 
 /** 代理的 keep-alive 连接会让 pi 在 agent_settled 之后仍不退出 */
@@ -34,7 +36,7 @@ export function runPi(opts: RunOptions): Promise<RunResult> {
   const args = ["-p", "--mode", "json", ...session, ...opts.piArgs, "--", opts.message];
   const child = spawn(piBin(), args, { cwd: opts.cwd, env: PI_ENV, stdio: ["ignore", "pipe", "pipe"] });
 
-  const tracker = createRunTracker(opts.onProgress);
+  const tracker = createRunTracker(opts.onProgress, opts.onActivity);
   const split = createLineSplitter();
   const stderr: Buffer[] = [];
 

@@ -100,8 +100,18 @@ test('运行中详情：显示按时间排列的动作流，最后一条标为�
   await ui.unmount()
 })
 
-test('运行中详情：还没有任何动作事件时给出等待提示', async ($: any, on: any) => {
+test('运行中详情：已经开始、还没有任何动作时，pi 在生成第一条回复，显示 thinking', async ($: any, on: any) => {
   liveWorld(on, [ev('r-x', 'start', '任务', 0)], T0 + 3000)
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'row-r-x' })
+  expect(await ui.find({ type: 'Text', text: /thinking/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /^\s*3s$/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /Waiting for pi to start/ })).toBeFalsy()
+  await ui.unmount()
+})
+
+test('运行中详情：连 start 事件都还没有时给出等待提示', async ($: any, on: any) => {
+  liveWorld(on, [], T0 + 3000)
   const ui = await $.ui.mount(PANE)
   await ui.press({ key: 'row-r-x' })
   expect(await ui.find({ type: 'Text', text: /Waiting for pi to start/ })).toBeTruthy()
@@ -239,6 +249,127 @@ test('运行中详情：pi 的提问排在动作流上面', async ($: any, on: a
   expect(await ui.find({ type: 'Text', text: /cli\.ts/ })).toBeTruthy()
   // asking 时最后一条不是“当前动作”
   expect(await ui.find({ type: 'Text', text: /▸/ })).toBeFalsy()
+  await ui.unmount()
+})
+
+// ---- 动作记录（runs/<runId>.activity.ndjson）
+const act = (type: string, text: string | undefined, secs: number, extra: Record<string, unknown> = {}) => ({ ...ev(R1, type, text, secs), ...extra })
+
+test('feedOf：按调用 id 配对工具开始与结束，得出耗时；没结束的标 open；pi 写的话成行', () => {
+  const rows = feedOf([
+    act('note', '先看看\n cli.ts', 1),
+    act('tool', 'read {"path":"/a/cli.ts"}', 2, { id: 'c1' }),
+    act('tool', 'bash {"command":"pnpm test"}', 3, { id: 'c2' }),
+    act('tool-end', 'read', 4.5, { id: 'c1' }),
+  ])
+  expect(rows.map((r) => [r.name, r.arg, r.ms, r.open, r.note])).toEqual([
+    ['pi', '先看看 cli.ts', undefined, undefined, true],
+    ['read', 'cli.ts', 2500, undefined, undefined],
+    ['bash', 'pnpm test', undefined, true, undefined],
+  ])
+})
+
+function activityWorld(on: any, logs: { activity: string; global?: string }, opts: { live?: string; now: number }) {
+  on('store.get', (_: any, e: any) => {
+    if (!String(e.key ?? '').startsWith('runs:') || !opts.live) return { value: undefined }
+    return { value: { [R1]: { session: 'mine-s', role: 'executor', summary: '动作记录测试', startedAt: T0, status: opts.live } } }
+  })
+  on('store.delete', () => ({ value: undefined }))
+  on('process.hookEnv', () => ({ value: { CLAUDE_CODE_SESSION_ID: 's1' } }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '/h\n', stderr: '' } }))
+  const entry = (name: string) => ({ name, kind: 'file', size: 100, mtimeMs: 1000, isLink: false })
+  on('fs.list', (_: any, e: any) => {
+    const path = String(e.path)
+    if (path.endsWith('/runs')) return { value: [entry(`${R1}.json`)] }
+    if (path.endsWith('/sessions')) return { value: [entry('mine-s.json')] }
+    return { value: [] }
+  })
+  const files = (path: string) =>
+    path.endsWith(`/runs/${R1}.activity.ndjson`) ? logs.activity : path.endsWith('/events.ndjson') ? (logs.global ?? '') : undefined
+  on('fs.read', (_: any, e: any) => {
+    const path = String(e.path)
+    if (path.endsWith(`/runs/${R1}.json`)) return { value: JSON.stringify({ runId: R1, session: 'mine-s', status: 'done', reply: '最终回复在这里', endedAt: '2026-11-18T10:05:00.000Z' }) }
+    if (path.endsWith('/sessions/mine-s.json')) return { value: JSON.stringify({ name: 'mine-s', cwd: '/w', owner: 's1' }) }
+    return { value: files(path) ?? '' }
+  })
+  on('fs.stat', (_: any, e: any) => {
+    const text = files(String(e.path))
+    if (text === undefined) throw new Error('ENOENT')
+    return { value: { size: text.length, kind: 'file' } }
+  })
+  on('clock.now', () => ({ value: opts.now }))
+}
+
+test('运行中详情（动作记录）：在跑的工具是当前动作，跑完的工具带耗时，pi 写的话也在流里', async ($: any, on: any) => {
+  activityWorld(on, {
+    activity: ndjson([
+      act('start', '任务', 0),
+      act('note', '先看看 cli.ts', 1),
+      act('tool', 'read {"path":"/a/cli.ts"}', 2, { id: 'c1' }),
+      act('tool-end', 'read', 3.5, { id: 'c1' }),
+      act('tool', 'ls {"path":"/a"}', 4.25, { id: 'c0' }),
+      act('tool-end', 'ls', 4.375, { id: 'c0' }),
+      act('tool', 'bash {"command":"pnpm test"}', 5, { id: 'c2' }),
+      // 并行：bash 还在跑，后开始的 grep 先结束，最后一行不是当前动作
+      act('tool', 'grep {"pattern":"TODO"}', 6, { id: 'c3' }),
+      act('tool-end', 'grep', 8, { id: 'c3' }),
+    ]),
+  }, { live: 'running', now: T0 + 12000 })
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: `row-${R1}` })
+  expect(await ui.find({ type: 'Text', text: /先看看 cli\.ts/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /^\s*1\.5s$/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /^\s*2\.0s$/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /^\s*125ms$/ })).toBeTruthy()
+  // bash 在 5s 开始、还没结束，现在 12s：当前动作已持续 7s；grep 不是当前动作
+  expect(await ui.find({ type: 'Text', text: /^\s*7s$/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /^\s*6s$/ })).toBeFalsy()
+  expect(await ui.find({ type: 'Text', text: /thinking/ })).toBeFalsy()
+  await ui.unmount()
+})
+
+test('运行中详情（动作记录）：没有工具在跑时显示 pi 在想，时长从最后一条事件算起', async ($: any, on: any) => {
+  activityWorld(on, {
+    activity: ndjson([
+      act('start', '任务', 0),
+      act('tool', 'read {"path":"/a/cli.ts"}', 2, { id: 'c1' }),
+      act('tool-end', 'read', 4, { id: 'c1' }),
+    ]),
+  }, { live: 'running', now: T0 + 13000 })
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: `row-${R1}` })
+  expect(await ui.find({ type: 'Text', text: /thinking/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /^\s*9s$/ })).toBeTruthy()
+  await ui.unmount()
+})
+
+test('运行中详情（动作记录）：并行工具超过显示上限时，最早开始、仍在跑的工具也留在流里并标为当前动作', async ($: any, on: any) => {
+  const reads = Array.from({ length: 11 }, (_, n) => [
+    act('tool', `read {"path":"/a/f${n}.ts"}`, 2, { id: `r${n}` }),
+    act('tool-end', 'read', 3, { id: `r${n}` }),
+  ]).flat()
+  activityWorld(on, {
+    activity: ndjson([act('start', '任务', 0), act('tool', 'bash {"command":"pnpm build"}', 1, { id: 'slow' }), ...reads]),
+  }, { live: 'running', now: T0 + 10000 })
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: `row-${R1}` })
+  expect(await ui.find({ type: 'Text', text: /pnpm build/ })).toBeTruthy()
+  // bash 在 1s 开始、还在跑，现在 10s
+  expect(await ui.find({ type: 'Text', text: /^\s*9s$/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /thinking/ })).toBeFalsy()
+  await ui.unmount()
+})
+
+test('已完成详情：有动作记录时读动作记录，不再去全局日志里找', async ($: any, on: any) => {
+  activityWorld(on, {
+    activity: ndjson([act('start', '任务', 0), act('note', '只在动作记录里的说明', 1), act('done', undefined, 2)]),
+    global: ndjson([ev(R1, 'tool', 'read {"path":"/only/global.ts"}', 1)]),
+  }, { now: T0 + 600_000 })
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: `row-${R1}` })
+  expect(await ui.find({ type: 'Text', text: /只在动作记录里的说明/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /global\.ts/ })).toBeFalsy()
+  expect(await ui.find({ type: 'Text', text: /最终回复在这里/ })).toBeTruthy()
   await ui.unmount()
 })
 

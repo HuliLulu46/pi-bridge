@@ -41,6 +41,12 @@ async function run(message) {
   emit({ type: "agent_start" });
   emit({ type: "extension_ui_request", id: "noise", method: "setStatus", statusKey: "demo", statusText: "busy" });
 
+  if (message === "activity") {
+    emit({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "先看看 cli.ts" }], stopReason: "toolUse" } });
+    emit({ type: "tool_execution_start", toolCallId: "call-1", toolName: "grep", args: { path: "/a/cli.ts", pattern: "x".repeat(400) } });
+    emit({ type: "tool_execution_end", toolCallId: "call-1", toolName: "grep", isError: false, result: { content: [{ type: "text", text: "1 match" }] } });
+    return finish("echo:activity");
+  }
   if (message === "ask") {
     emit({ type: "tool_execution_start", toolName: "question", args: { question: "选 A 还是 B？" } });
     const res = await dialog({ id: "ask-1", method: "select", title: "选 A 还是 B？", options: ["1. A", "2. B"] });

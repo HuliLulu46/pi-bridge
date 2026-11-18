@@ -19,6 +19,8 @@ export interface PiEvent {
   type: string;
   id?: string;
   message?: PiMessage;
+  /** 工具开始与结束靠它配对：pi 可以并行执行工具 */
+  toolCallId?: string;
   toolName?: string;
   args?: unknown;
   result?: { content?: ContentBlock[] };
@@ -86,8 +88,19 @@ export function parseEvent(line: string): PiEvent | undefined {
   }
 }
 
-/** 跟踪一次运行：把工具调用与重试转成进度行；回复为本次运行中每条正常结束的 assistant 文本（含 steer 引出的回复） */
-export function createRunTracker(onProgress: (line: string) => void) {
+/** 只进本次运行动作记录的条目：带调用 id 和完整入参的工具开始、工具结束、pi 在工具调用之间写的话 */
+export interface Activity {
+  type: "tool" | "tool-end" | "note";
+  text: string;
+  id?: string;
+  error?: boolean;
+}
+
+/**
+ * 跟踪一次运行：把工具调用与重试转成进度行，把动作明细交给 onActivity；
+ * 回复为本次运行中每条正常结束的 assistant 文本（含 steer 引出的回复）
+ */
+export function createRunTracker(onProgress: (line: string) => void, onActivity: (activity: Activity) => void) {
   let lastAssistant: PiMessage | undefined;
   let settled = false;
   const replies: string[] = [];
@@ -108,12 +121,16 @@ export function createRunTracker(onProgress: (line: string) => void) {
           }
           const text = textOf(lastAssistant.content).trim();
           if (lastAssistant.stopReason === "stop" && text) replies.push(text);
+          // 正常结束的是回复，运行记录里已有；其余（调工具前的说明、出错或中止前写了一半的）进动作记录
+          else if (text) onActivity({ type: "note", text });
           break;
         }
         case "tool_execution_start":
           onProgress(`[tool] ${event.toolName} ${preview(event.args)}`);
+          onActivity({ type: "tool", id: event.toolCallId, text: `${event.toolName} ${JSON.stringify(event.args ?? {})}` });
           break;
         case "tool_execution_end":
+          onActivity({ type: "tool-end", id: event.toolCallId, text: event.toolName ?? "", ...(event.isError ? { error: true } : {}) });
           if (event.isError) {
             const summary = `${event.toolName}: ${preview(textOf(event.result?.content))}`;
             failedTools.push(summary);

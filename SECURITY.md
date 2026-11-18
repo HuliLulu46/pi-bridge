@@ -10,7 +10,7 @@
 
 Treat an executor run like running a coding agent yourself: say in the message which directories it may change and whether it may commit, and review the diff it reports.
 
-pi-bridge stores session records, run records (including full replies) and an event log under `~/.pi-bridge/`. With `fork=true`, `pi-agent` writes the current conversation to `~/.pi-bridge/history/` and pi-bridge deletes the file after importing it.
+pi-bridge stores session records, run records (including full replies), per-run activity logs (full tool arguments and pi's notes between tool calls) and an event log under `~/.pi-bridge/`. With `fork=true`, `pi-agent` writes the current conversation to `~/.pi-bridge/history/` and pi-bridge deletes the file after importing it.
 
 ## Reporting a vulnerability
 

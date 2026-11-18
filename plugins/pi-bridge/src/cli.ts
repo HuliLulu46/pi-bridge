@@ -13,6 +13,7 @@ import { createWorktree, projectIdentity, removeWorktree, rollbackError, type Re
 import { findPiSession, forkPiSession, importPiHistory, newSessionId, piSessionDir, readHistoryFile } from "./fork.ts";
 import { prepareReview } from "./review.ts";
 import {
+  appendActivity,
   appendEvent,
   assertRunId,
   eventFromProgress,
@@ -405,6 +406,7 @@ async function runPrint(
       message,
       piArgs: [...(isNew ? ["--name", record.name] : []), ...ADVISOR_ARGS, "--append-system-prompt", subagentPrompt("advisor"), ...modelArgs(opts.model, opts.thinking)],
       onProgress: progress,
+      onActivity: (activity) => appendActivity({ session: record.name, runId: run.runId, ...activity }),
     });
   } catch (err) {
     run = { ...run, status: "failed", endedAt: new Date().toISOString(), error: (err as Error).message, exitCode: 1 };

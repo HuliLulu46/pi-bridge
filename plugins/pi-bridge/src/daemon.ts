@@ -2,11 +2,11 @@
 import { spawn } from "node:child_process";
 import { appendFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
-import { createLineSplitter, createRunTracker, parseEvent, preview, toolNotice, type PiEvent } from "./events.ts";
+import { createLineSplitter, createRunTracker, parseEvent, preview, toolNotice, type Activity, type PiEvent } from "./events.ts";
 import { trackChanges } from "./git.ts";
 import { modelArgs, PI_ENV, piBin } from "./pi.ts";
 import { DONE, FAILED, formatAsk, type Ask, type AskMethod, type ClientRequest, type DaemonMessage } from "./protocol.ts";
-import { appendEvent, eventFromProgress, newRunId, pruneRuns, writeRun, type RunRecord } from "./runs.ts";
+import { appendActivity, appendEvent, eventFromProgress, newRunId, pruneRuns, writeRun, type RunRecord } from "./runs.ts";
 import { subagentPrompt } from "./prompts.ts";
 import { acquireLock, logPath, readRecord, runPath, sessionIdOf, writeRecord } from "./store.ts";
 
@@ -74,7 +74,7 @@ const pi = spawn(
 let busy = false;
 /** 当前（或上一次）运行的记录，写进 ~/.pi-bridge/runs/<runId>.json */
 let run: RunRecord | undefined;
-let tracker = createRunTracker(emit);
+let tracker = createRunTracker(emit, activity);
 let finishChanges = (): string => "";
 let runLines: string[] = [];
 /** 本次运行中被自动拒绝的权限确认，附在回复末尾 */
@@ -128,6 +128,10 @@ function emit(line: string): void {
   for (const socket of watchers) send(socket, { type: "line", line }, false);
 }
 
+function activity(entry: Activity): void {
+  if (run) appendActivity({ session: name, runId: run.runId, ...entry });
+}
+
 function piCommand(command: Record<string, unknown>): Promise<PiEvent> {
   const id = `bridge-${++commandSeq}`;
   pi.stdin.write(`${JSON.stringify({ ...command, id })}\n`);
@@ -146,7 +150,7 @@ function scheduleIdleExit(): void {
 function startRun(message: string): void {
   busy = true;
   clearTimeout(idleTimer);
-  tracker = createRunTracker(emit);
+  tracker = createRunTracker(emit, activity);
   finishChanges = trackChanges(record.cwd);
   runLines = [];
   denied = [];

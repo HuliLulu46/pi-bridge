@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, test } from "node:test";
 import { initRepo, run, setup } from "./helpers.ts";
+import { appendEvent } from "../plugins/pi-bridge/src/runs.ts";
 
 let home: string;
 
@@ -235,6 +236,52 @@ test("实际使用的模型与思考等级只上报一次：事件日志里有 m
   assert.equal(model[0].runId, out.runId);
   assert.equal(model[0].text, "fake/m1 low");
   assert.match(readFileSync(join(home, "logs", "s1.log"), "utf8"), /^\[model\] fake\/m1 low$/m);
+});
+
+function activityOf(runId: string): any[] {
+  return readFileSync(join(home, "runs", `${runId}.activity.ndjson`), "utf8")
+    .split("\n")
+    .filter((line) => line !== "")
+    .map((line) => JSON.parse(line));
+}
+
+// 前台（advisor）与常驻进程（executor）两条路径写出同样的动作记录
+for (const role of ["advisor", "executor"]) {
+  test(`${role}：动作记录有 pi 的说明、带调用 id 和完整入参的工具开始与结束；全局日志不变`, () => {
+    ({ home } = setup());
+    const out = json(run(["send", "s1", "--role", role, "--json", "activity"]).stdout);
+    assert.equal(out.reply, "echo:activity");
+    const act = activityOf(out.runId);
+    assert.deepEqual(act.map((e) => e.type), ["start", "note", "tool", "tool-end", "done"]);
+    assert.ok(act.every((e) => e.runId === out.runId && e.session === "s1" && typeof e.ts === "string"));
+    assert.equal(act[1].text, "先看看 cli.ts");
+    assert.equal(act[2].id, "call-1");
+    assert.equal(act[2].text, `grep ${JSON.stringify({ path: "/a/cli.ts", pattern: "x".repeat(400) })}`);
+    assert.deepEqual([act[3].id, act[3].text, act[3].error], ["call-1", "grep", undefined]);
+    // 最终回复只在运行记录里
+    assert.ok(!JSON.stringify(act).includes("echo:activity"));
+
+    const global = events();
+    assert.deepEqual(global.map((e) => e.type), ["start", "tool", "done"]);
+    assert.ok(global[1].text.length <= 300, "全局日志里的入参仍然截断");
+    assert.ok(!JSON.stringify(global).includes("先看看"), "全局日志不放 pi 写的话");
+  });
+}
+
+test("动作记录写不进去时不抛错，全局日志照常写入", () => {
+  ({ home } = setup());
+  const runId = "r-abc123-0a0b0c";
+  // 同名目录占住动作记录的路径：appendFileSync 会报 EISDIR
+  mkdirSync(join(home, "runs", `${runId}.activity.ndjson`), { recursive: true });
+  const saved = process.env.PI_BRIDGE_HOME;
+  process.env.PI_BRIDGE_HOME = home;
+  try {
+    appendEvent({ session: "s1", runId, type: "done" });
+  } finally {
+    if (saved === undefined) delete process.env.PI_BRIDGE_HOME;
+    else process.env.PI_BRIDGE_HOME = saved;
+  }
+  assert.deepEqual(events().map((e) => [e.runId, e.type]), [[runId, "done"]]);
 });
 
 test("没有模型信息时不产生 model 事件，文本输出不变", () => {

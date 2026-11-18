@@ -52,6 +52,12 @@ const modelInfo = process.env.FAKE_PI_MODEL ? { provider: "fake", model: process
     });
   }
 
+  if (message === "activity") {
+    assistant({ content: [{ type: "text", text: "先看看 cli.ts" }], stopReason: "toolUse" });
+    emit({ type: "tool_execution_start", toolCallId: "call-1", toolName: "grep", args: { path: "/a/cli.ts", pattern: "x".repeat(400) } });
+    emit({ type: "tool_execution_end", toolCallId: "call-1", toolName: "grep", isError: false, result: { content: [{ type: "text", text: "1 match" }] } });
+  }
+
   if (message === "error") {
     assistant({ content: [], stopReason: "error", errorMessage: "rate limited" });
   } else {

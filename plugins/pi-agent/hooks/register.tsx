@@ -276,8 +276,27 @@ function pickEvents(lines: string[], runId: string): Json[] {
   return out
 }
 
-// 事件日志末尾 64KB 里某次运行的事件（运行中详情的信息流、预览的“最近动作”、待回答的提问）
+// pi-bridge 给每次运行写的动作记录（runs/<runId>.activity.ndjson）：全局事件的不截断版，外加工具结束和 pi 写的话。
+// 给了 tail 就只读末尾。没有这个文件（旧版本 pi-bridge 跑的）返回 undefined，由调用方退回全局日志
+async function readActivity($: any, runId: string, tail?: number): Promise<Json[] | undefined> {
+  if (!RUN_ID.test(runId)) return undefined
+  try {
+    const file = `${await homeOf($)}/.pi-bridge/runs/${runId}.activity.ndjson`
+    const { size } = await $.fs.stat(file)
+    const offset = tail === undefined ? 0 : Math.max(0, size - tail)
+    const lines = (await $.fs.read(file, { offset, length: size - offset }) as string).split('\n')
+    if (offset > 0) lines.shift()
+    const events = pickEvents(lines, runId)
+    return events.length > 0 ? events : undefined
+  } catch {
+    return undefined
+  }
+}
+
+// 运行中详情的信息流、预览的“最近动作”、待回答的提问：先读动作记录末尾，没有就读全局日志末尾 64KB
 async function runEvents($: any, runId: string): Promise<Json[]> {
+  const own = await readActivity($, runId, 131072)
+  if (own) return own
   try {
     const file = `${await homeOf($)}/.pi-bridge/events.ndjson`
     const { size } = await $.fs.stat(file)
@@ -291,9 +310,11 @@ async function runEvents($: any, runId: string): Promise<Json[]> {
   }
 }
 
-// 已完成任务的全部事件：整份日志（含轮转出去的 .1，先旧后新）里按 runId 取。
+// 已完成任务的全部事件：整份动作记录；没有就在整份全局日志（含轮转出去的 .1，先旧后新）里按 runId 取。
 // 只在进入详情页时读一次；render 每个轮询周期都会跑，不能走这里
 async function allRunEvents($: any, runId: string): Promise<Json[]> {
+  const own = await readActivity($, runId)
+  if (own) return own
   const file = `${await homeOf($)}/.pi-bridge/events.ndjson`
   const out: Json[] = []
   for (const path of [`${file}.1`, file]) {
@@ -307,7 +328,7 @@ async function allRunEvents($: any, runId: string): Promise<Json[]> {
 const oneLine = (s: string) => s.replace(/\s+/g, ' ').trim()
 const baseName = (path: string) => path.split('/').filter(Boolean).pop() ?? path
 
-// 工具事件的 text 是“名字 入参JSON”，入参被截到 200 字：grep 的 pattern、bash 的 command 常常截断成不合法的 JSON。
+// 工具事件的 text 是“名字 入参JSON”。全局日志里入参被截到 200 字，grep 的 pattern、bash 的 command 常常截断成不合法的 JSON：
 // 整段解析不了就按字段名抽（取到字符串开头为止）
 function field(args: string, parsed: Json | undefined, name: string): string | undefined {
   if (parsed) return typeof parsed[name] === 'string' ? parsed[name] : undefined
@@ -343,10 +364,12 @@ function toolBrief(text: string): string {
   return `${name} ${arg.slice(0, 40)}`.trim()
 }
 
-// 信息流里出现的事件。start / model / done / failed 在表头和回复里已有，不重复
-type FeedRow = { at: number; mark: string; color?: string; name: string; arg: string }
+// 信息流里出现的事件。start / model / done / failed 在表头和回复里已有，不重复；tool-end 只用来给工具行配耗时。
+// 动作记录里的工具行带调用 id：配上 tool-end 的有 ms，还没结束的 open
+type FeedRow = { at: number; mark: string; color?: string; name: string; arg: string; note?: boolean; ms?: number; open?: boolean }
 const FEED: Record<string, { mark: string; color?: string; name?: string }> = {
   tool: { mark: ' ' },
+  note: { mark: '›', color: 'claude', name: 'pi' },
   'tool-error': { mark: '✗', color: 'error', name: 'error' },
   retry: { mark: '⟳', color: 'warning', name: 'retry' },
   steer: { mark: '↪', color: 'suggestion', name: 'steer' },
@@ -357,35 +380,58 @@ const FEED: Record<string, { mark: string; color?: string; name?: string }> = {
 }
 
 export function feedOf(events: Json[]): FeedRow[] {
+  const ends = new Map<string, number>()
+  for (const ev of events) if (ev.type === 'tool-end' && ev.id) ends.set(ev.id, Date.parse(ev.ts) || 0)
   return events.flatMap((ev): FeedRow[] => {
     const kind = FEED[ev.type]
     if (!kind) return []
     const text = String(ev.text ?? '')
     const { name, arg } = ev.type === 'tool' ? briefOf(text) : { name: kind.name!, arg: oneLine(text) }
-    return [{ at: Date.parse(ev.ts) || 0, mark: kind.mark, color: kind.color, name, arg }]
+    const row: FeedRow = { at: Date.parse(ev.ts) || 0, mark: kind.mark, color: kind.color, name, arg }
+    if (ev.type === 'note') row.note = true
+    if (ev.type === 'tool' && ev.id) {
+      const end = ends.get(ev.id)
+      if (end === undefined) row.open = true
+      else row.ms = end - row.at
+    }
+    return [row]
   })
 }
 
 const clockOf = (at: number) => new Date(at).toTimeString().slice(0, 8)
+const took = (ms: number) => (ms < 1000 ? `${ms}ms` : ms < 60_000 ? `${(ms / 1000).toFixed(1)}s` : elapsed(ms))
 
-// 最近 limit 条；传了 now 就把最后一条标成“当前动作”并写上它已持续多久（距上一条事件，分不清是在跑工具还是在想）
-function feedView({ Box, Text }: { Box: any; Text: any }, rows: FeedRow[], limit: number, now?: number) {
-  const shown = rows.slice(-limit)
+// 最近 limit 条，在跑的工具不管多早开始都留着。传了 live（运行中）就标出当前动作和它已持续多久：
+// 动作记录配得上工具结束时，在跑的工具是当前动作，没有工具在跑就是 pi 在想（距最后一条事件）；
+// 只有全局日志时分不清，把最后一条当成当前动作；还没有任何动作时 pi 在生成第一条回复，也算在想
+function feedView({ Box, Text }: { Box: any; Text: any }, rows: FeedRow[], limit: number, live?: { now: number; lastAt: number }) {
+  const shown = rows.filter((r, i) => i >= rows.length - limit || r.open)
+  const tracked = rows.some((r) => r.open || r.ms !== undefined || r.note)
+  const thinking = live && (tracked || rows.length === 0) && !rows.some((r) => r.open)
   return (
     <Box flexDirection="column">
       {rows.length > shown.length && <Text dimColor>         … {rows.length - shown.length} earlier</Text>}
       {shown.map((r, n) => {
-        const current = now !== undefined && n === shown.length - 1
+        const current = live !== undefined && (tracked ? !!r.open : n === shown.length - 1)
         return (
           <Text key={`feed-${n}`} wrap="truncate-end">
             <Text dimColor>{clockOf(r.at)}  </Text>
             <Text color={current ? 'success' : r.color}>{current ? '▸' : r.mark} </Text>
             <Text bold={current} color={r.color}>{r.name}</Text>
-            <Text dimColor>  {r.arg}</Text>
-            {current && <Text color="success">  {elapsed(now - r.at)}</Text>}
+            <Text dimColor={!r.note}>  {r.arg}</Text>
+            {current && <Text color="success">  {elapsed(live.now - r.at)}</Text>}
+            {!current && r.ms !== undefined && <Text dimColor>  {took(r.ms)}</Text>}
           </Text>
         )
       })}
+      {thinking && (
+        <Text key="feed-thinking" wrap="truncate-end">
+          <Text dimColor>{clockOf(live.lastAt)}  </Text>
+          <Text color="success">▸ </Text>
+          <Text bold>thinking</Text>
+          <Text color="success">  {elapsed(live.now - live.lastAt)}</Text>
+        </Text>
+      )}
     </Box>
   )
 }
@@ -623,7 +669,7 @@ async function describe($: any, runId: string, what: string): Promise<string> {
   const cut = body.length > NOTE_MAX ? `${body.slice(0, NOTE_MAX)}… (full text: PiAgent action=result runId=${runId})` : body
   // 失败时附上重试记录：路由组会换线路，最终报错只反映最后一条线路。只列最后几次
   const evs = failed ? await runEvents($, runId) : []
-  const retries = evs.filter((ev) => ev.type === 'retry').map((ev) => `retry: ${String(ev.text ?? '').slice(0, 200)}`)
+  const retries = evs.filter((ev) => ev.type === 'retry').map((ev) => `retry: ${oneLine(String(ev.text ?? '')).slice(0, 200)}`)
   const more = retries.length > RETRY_SHOWN ? [`(${retries.length} retries, showing the last ${RETRY_SHOWN})`] : []
   const model = evs.find((ev) => ev.type === 'model')?.text
   return [`- ${r.session} · ${runId} · ${what}${model ? ` (model ${model})` : ''}`, ...more, ...retries.slice(-RETRY_SHOWN), cut].join('\n')
@@ -1024,8 +1070,8 @@ export const register: Register = (on) => {
                 ))}
               </Box>
             )}
-            {feed.length > 0
-              ? feedView({ Box, Text }, feed, 10, cur.run.status === 'running' ? now : undefined)
+            {evs.length > 0
+              ? feedView({ Box, Text }, feed, 10, cur.run.status === 'running' ? { now, lastAt: Date.parse(evs.at(-1)?.ts) || now } : undefined)
               : <Text dimColor>Waiting for pi to start…</Text>}
             <Box>
               <Button key="back" label="Back" hotkey="b" onPress={back} />
